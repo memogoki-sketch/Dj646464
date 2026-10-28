@@ -5,10 +5,15 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.ConnectivityManager
 import android.os.Bundle
 import android.os.Handler
@@ -26,6 +31,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -34,11 +40,16 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @androidx.annotation.OptIn(UnstableApi::class)
 class MainActivity : Activity() {
@@ -48,6 +59,13 @@ class MainActivity : Activity() {
     private val navy = 0xFF0B1F4B.toInt()
     private val navyLight = 0xFF16306B.toInt()
     private val yellow = 0xFFFFD400.toInt()
+    private val pickImageCode = 42
+
+    private val resizeNames = listOf("Anpassen (Original-Format)", "Gestreckt (Vollbild)", "Zoom (Ränder abschneiden)")
+    private val seekChoices = listOf(5, 10, 20, 30, 60)
+    private val volumeChoices = listOf(100, 90, 80, 70, 60, 50, 40, 30, 20, 10)
+    private val scaleNames = listOf("Klein", "Normal", "Groß", "Sehr groß")
+    private val scaleValues = listOf(0.85f, 1.0f, 1.2f, 1.4f)
 
     private val handler = Handler(Looper.getMainLooper())
     private val hideStatusRunnable = Runnable { status(null) }
@@ -58,11 +76,15 @@ class MainActivity : Activity() {
     private lateinit var playerView: PlayerView
     private lateinit var statusView: TextView
     private val cacheFile by lazy { File(filesDir, "playlist.m3u") }
+    private val bgFile by lazy { File(filesDir, "bg.jpg") }
 
     private var player: ExoPlayer? = null
     private var screen = Screen.HOME
+    private var uiScale = 1f
 
     private var channels: List<Channel> = emptyList()
+    private var headerEpgUrl = ""
+    private var epg: Epg? = null
 
     // Browse-Zustand
     private var browseKind = Kind.LIVE
@@ -77,6 +99,7 @@ class MainActivity : Activity() {
     private var playIndex = 0
     private var playKind = Kind.LIVE
     private var retries = 0
+    private var infoPending = false
 
     // ---------------------------------------------------------------- Lebenszyklus
 
@@ -84,15 +107,22 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         store = Store(this)
+        uiScale = store.uiScale
         buildRoot()
+        applyBackground()
 
         if (cacheFile.exists()) {
-            runCatching { channels = M3uParser.parse(cacheFile.readText()) }
+            runCatching {
+                val pl = M3uParser.parse(cacheFile.readText())
+                channels = pl.channels
+                headerEpgUrl = pl.epgUrl
+            }
         }
         showHome()
+        loadEpg()
 
-        val url = store.url
-        if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
+        val url = store.playlistUrl()
+        if (url.isBlank()) showAccountDialog() else refreshPlaylist(url)
     }
 
     override fun onStart() {
@@ -110,7 +140,9 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Grundgerüst
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density * uiScale).toInt()
+
+    private fun ts(v: Float): Float = v * uiScale
 
     private fun buildRoot() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
@@ -120,6 +152,7 @@ class MainActivity : Activity() {
             isFocusable = false
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         }
+        applyResize()
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
 
         content = FrameLayout(this).apply { setBackgroundColor(navy) }
@@ -129,16 +162,46 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             textSize = 16f
             setBackgroundColor(0xCC000000.toInt())
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(24, 12, 24, 12)
             visibility = View.GONE
         }
         root.addView(
             statusView,
             FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
-                setMargins(dp(16), dp(16), dp(16), dp(16))
+                setMargins(32, 32, 32, 32)
             }
         )
         setContentView(root)
+    }
+
+    private fun applyResize() {
+        playerView.resizeMode = when (store.resize) {
+            1 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+            2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    private fun applyBackground() {
+        val bmp: Bitmap? = if (bgFile.exists()) {
+            try {
+                BitmapFactory.decodeFile(bgFile.path)
+            } catch (e: Throwable) {
+                null
+            }
+        } else null
+        if (bmp != null) {
+            val layers = arrayOf<Drawable>(
+                BitmapDrawable(resources, bmp),
+                ColorDrawable(0xB30B1F4B.toInt())
+            )
+            content.background = LayerDrawable(layers)
+        } else {
+            content.background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(0xFF0B1F4B.toInt(), 0xFF14307A.toInt(), 0xFF0B1F4B.toInt())
+            )
+        }
     }
 
     private fun setScreen(view: View) {
@@ -161,7 +224,7 @@ class MainActivity : Activity() {
     private fun label(text: String, size: Float, color: Int = Color.WHITE, bold: Boolean = false): TextView =
         TextView(this).apply {
             this.text = text
-            textSize = size
+            textSize = ts(size)
             setTextColor(color)
             if (bold) setTypeface(typeface, Typeface.BOLD)
         }
@@ -169,7 +232,7 @@ class MainActivity : Activity() {
     private fun tileBackground(focused: Boolean): GradientDrawable =
         GradientDrawable().apply {
             cornerRadius = dp(18).toFloat()
-            setColor(if (focused) 0xFF1F4190.toInt() else navyLight)
+            setColor(if (focused) 0xFF1F4190.toInt() else 0xCC16306B.toInt())
             setStroke(dp(if (focused) 4 else 1), if (focused) yellow else 0x55FFFFFF)
         }
 
@@ -180,7 +243,7 @@ class MainActivity : Activity() {
             isFocusable = true
             isClickable = true
             background = tileBackground(false)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setPadding(dp(10), dp(10), dp(10), dp(10))
             setOnClickListener { onClick() }
             setOnFocusChangeListener { v, focused ->
                 v.background = tileBackground(focused)
@@ -188,17 +251,17 @@ class MainActivity : Activity() {
                 v.animate().scaleX(s).scaleY(s).setDuration(120).start()
             }
         }
-        val iconView = label(icon, if (big) 54f else 30f, yellow)
+        val iconView = label(icon, if (big) 54f else 28f, yellow)
         iconView.gravity = Gravity.CENTER
-        val textView = label(text, if (big) 24f else 16f, Color.WHITE, true)
+        val textView = label(text, if (big) 24f else 15f, Color.WHITE, true)
         textView.gravity = Gravity.CENTER
         box.addView(iconView, LinearLayout.LayoutParams(-2, -2))
-        box.addView(textView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
+        box.addView(textView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
         return box
     }
 
     private fun addTile(row: LinearLayout, t: View, w: Int, h: Int) {
-        row.addView(t, LinearLayout.LayoutParams(w, h).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+        row.addView(t, LinearLayout.LayoutParams(w, h).apply { setMargins(dp(8), dp(8), dp(8), dp(8)) })
     }
 
     private fun styledAdapter(): ArrayAdapter<String> =
@@ -206,7 +269,7 @@ class MainActivity : Activity() {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val v = super.getView(position, convertView, parent) as TextView
                 v.setTextColor(Color.WHITE)
-                v.textSize = 18f
+                v.textSize = ts(18f)
                 v.maxLines = 1
                 v.setPadding(dp(16), dp(12), dp(16), dp(12))
                 return v
@@ -233,6 +296,11 @@ class MainActivity : Activity() {
 
     private fun count(kind: Kind): Int = channels.count { it.kind == kind }
 
+    private fun refreshAll() {
+        val url = store.playlistUrl()
+        if (url.isBlank()) showAccountDialog() else refreshPlaylist(url)
+    }
+
     private fun showHome() {
         screen = Screen.HOME
         val page = LinearLayout(this).apply {
@@ -245,10 +313,7 @@ class MainActivity : Activity() {
             label("DJ64", 40f, yellow, true),
             LinearLayout.LayoutParams(0, -2, 1f)
         )
-        addTile(top, tile("⟳", "Aktualisieren", false) {
-            val url = store.url
-            if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
-        }, dp(150), dp(86))
+        addTile(top, tile("⟳", "Aktualisieren", false) { refreshAll() }, dp(150), dp(86))
         addTile(top, tile("⚙", "Einstellungen", false) { showSettings() }, dp(150), dp(86))
         page.addView(top, LinearLayout.LayoutParams(-1, -2))
 
@@ -309,7 +374,7 @@ class MainActivity : Activity() {
         if (channels.isEmpty() || items.isEmpty()) {
             page.addView(
                 label(
-                    "Hier ist noch nichts. Lade die Playlist unter Einstellungen → Playlist ändern.",
+                    "Hier ist noch nichts. Trage unter Einstellungen → Zugangsdaten deine Playlist ein.",
                     18f
                 ),
                 LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(24) }
@@ -324,7 +389,7 @@ class MainActivity : Activity() {
         catAdapter.addAll(catLabels)
         val catList = ListView(this).apply {
             adapter = catAdapter
-            setBackgroundColor(navyLight)
+            setBackgroundColor(0xCC16306B.toInt())
             selector = ColorDrawable(0x66FFD400)
             divider = null
             isFocusable = true
@@ -334,7 +399,7 @@ class MainActivity : Activity() {
         chanAdapter = cAdapter
         val cList = ListView(this).apply {
             adapter = cAdapter
-            setBackgroundColor(0xFF0F2860.toInt())
+            setBackgroundColor(0xCC0F2860.toInt())
             selector = ColorDrawable(0x66FFD400)
             divider = null
             isFocusable = true
@@ -393,8 +458,18 @@ class MainActivity : Activity() {
             }
         }
         val adapter = chanAdapter ?: return
+        val e = epg
+        val now = System.currentTimeMillis()
         adapter.clear()
-        adapter.addAll(currentItems.map { (if (it.url in favs) "★ " else "") + it.name })
+        adapter.addAll(currentItems.map { c ->
+            val star = if (c.url in favs) "★ " else ""
+            var suffix = ""
+            if (e != null && c.kind == Kind.LIVE) {
+                val cur = e.nowNext(c, now).first
+                if (cur != null) suffix = "   —   ${cur.title}"
+            }
+            star + c.name + suffix
+        })
         adapter.notifyDataSetChanged()
     }
 
@@ -414,38 +489,70 @@ class MainActivity : Activity() {
         screen = Screen.SETTINGS
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(40), dp(24), dp(40), dp(24))
+            setPadding(dp(40), dp(20), dp(40), dp(16))
         }
         page.addView(label("Einstellungen", 34f, yellow, true), LinearLayout.LayoutParams(-2, -2))
 
         val grid = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_HORIZONTAL
         }
-        val w = dp(250)
-        val h = dp(150)
+        val w = dp(230)
+        val h = dp(110)
 
         val row1 = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        val netTile = tile("🌐", "Netzwerk / WLAN\n${networkText()}", false) { openNetworkSettings() }
-        addTile(row1, netTile, w, h)
-        addTile(row1, tile("📝", "Playlist ändern", false) { askForPlaylistUrl() }, w, h)
-        addTile(row1, tile("🔄", "Playlist aktualisieren", false) {
-            val url = store.url
-            if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
-        }, w, h)
+        val accountTile = tile("👤", "Zugangsdaten", false) { showAccountDialog() }
+        addTile(row1, accountTile, w, h)
+        addTile(row1, tile("🌐", "Netzwerk / WLAN\n${networkText()}", false) { openNetworkSettings() }, w, h)
+        addTile(row1, tile("🔄", "Playlist aktualisieren", false) { refreshAll() }, w, h)
         addTile(row1, tile("🗂", "Kategorien verwalten", false) { manageCategories() }, w, h)
 
         val row2 = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        addTile(row2, tile("🧹", "Cache leeren", false) { clearCache() }, w, h)
-        addTile(row2, tile("⚙", "Weitere Einstellungen", false) { openSystemSettings() }, w, h)
-        addTile(row2, tile("ℹ", "Info", false) { showInfo() }, w, h)
+        addTile(row2, tile("⏯", "Player\nSpulen · Ton · Format", false) { playerSettings() }, w, h)
+        addTile(row2, tile("🔠", "Darstellungsgröße\n${scaleNames[scaleIndex()]}", false) { pickScale() }, w, h)
+        addTile(row2, tile("🖼", "Hintergrundbild", false) { backgroundMenu() }, w, h)
+        addTile(row2, tile("📅", "Programmführer (EPG)", false) { epgDialog() }, w, h)
+
+        val row3 = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        addTile(row3, tile("🧹", "Cache leeren", false) { clearCache() }, w, h)
+        addTile(row3, tile("⚙", "Weitere Einstellungen", false) { openSystemSettings() }, w, h)
+        addTile(row3, tile("ℹ", "Info und Tasten", false) { showInfo() }, w, h)
 
         grid.addView(row1, LinearLayout.LayoutParams(-2, -2))
         grid.addView(row2, LinearLayout.LayoutParams(-2, -2))
-        page.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+        grid.addView(row3, LinearLayout.LayoutParams(-2, -2))
+
+        val scroll = ScrollView(this).apply { addView(grid, FrameLayout.LayoutParams(-1, -2)) }
+        page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
         setScreen(page)
-        netTile.post { netTile.requestFocus() }
+        accountTile.post { accountTile.requestFocus() }
+    }
+
+    private fun scaleIndex(): Int {
+        var best = 1
+        var diff = Float.MAX_VALUE
+        scaleValues.forEachIndexed { i, v ->
+            val d = Math.abs(v - store.uiScale)
+            if (d < diff) {
+                diff = d
+                best = i
+            }
+        }
+        return best
+    }
+
+    private fun pickScale() {
+        AlertDialog.Builder(this)
+            .setTitle("Größe der App-Darstellung")
+            .setSingleChoiceItems(scaleNames.toTypedArray(), scaleIndex()) { d, which ->
+                store.uiScale = scaleValues[which]
+                uiScale = scaleValues[which]
+                d.dismiss()
+                showSettings()
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
     }
 
     private fun openNetworkSettings() {
@@ -497,16 +604,337 @@ class MainActivity : Activity() {
         runCatching { cacheFile.delete() }
         runCatching { cacheDir.deleteRecursively() }
         status("Cache geleert", 2000)
-        val url = store.url
+        val url = store.playlistUrl()
         if (url.isNotBlank()) refreshPlaylist(url)
     }
 
-    private fun showInfo() {
+    // ---- Player-Einstellungen
+
+    private fun playerSettings() {
+        val items = arrayOf(
+            "Vor-/Zurückspulen: ${store.seekSec} Sekunden",
+            "Lautstärke in der App: ${store.volume} %",
+            "Bildschirmformat: ${resizeNames[store.resize]}"
+        )
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.1")
+            .setTitle("Player")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> pickSeek()
+                    1 -> pickVolume()
+                    else -> pickResize()
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun pickSeek() {
+        val names = seekChoices.map { "$it Sekunden" }.toTypedArray()
+        val cur = seekChoices.indexOf(store.seekSec).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Spulschritt (Links/Rechts)")
+            .setSingleChoiceItems(names, cur) { d, which ->
+                store.seekSec = seekChoices[which]
+                d.dismiss()
+                playerSettings()
+            }
+            .show()
+    }
+
+    private fun pickVolume() {
+        val names = volumeChoices.map { "$it %" }.toTypedArray()
+        val cur = volumeChoices.indexOf(store.volume).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Lautstärke in der App")
+            .setSingleChoiceItems(names, cur) { d, which ->
+                store.volume = volumeChoices[which]
+                player?.volume = store.volume / 100f
+                d.dismiss()
+                playerSettings()
+            }
+            .show()
+    }
+
+    private fun pickResize() {
+        AlertDialog.Builder(this)
+            .setTitle("Bildschirmformat")
+            .setSingleChoiceItems(resizeNames.toTypedArray(), store.resize) { d, which ->
+                store.resize = which
+                applyResize()
+                d.dismiss()
+                playerSettings()
+            }
+            .show()
+    }
+
+    // ---- Zugangsdaten
+
+    private fun showAccountDialog() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+        }
+        fun addField(hint: String, value: String, type: Int): EditText {
+            val e = EditText(this).apply {
+                setSingleLine(true)
+                this.hint = hint
+                setText(value)
+                inputType = type
+            }
+            box.addView(e, LinearLayout.LayoutParams(-1, -2))
+            return e
+        }
+        val uri = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        val plain = InputType.TYPE_CLASS_TEXT
+        val visiblePass = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+
+        box.addView(TextView(this).apply {
+            text = "Xtream-Zugang (Server, Benutzername, Passwort)"
+            setTextColor(Color.WHITE)
+        })
+        val server = addField("Server-URL, z. B. http://server.de:8080", store.server, uri)
+        val user = addField("Benutzername", store.user, plain)
+        val pass = addField("Passwort", store.pass, visiblePass)
+        box.addView(TextView(this).apply {
+            text = "\noder M3U-Wiedergabeliste (wird genutzt, wenn Server oder Benutzer leer ist)"
+            setTextColor(Color.WHITE)
+        })
+        val m3u = addField("http://…/playlist.m3u", store.url, uri)
+
+        val scroll = ScrollView(this).apply { addView(box) }
+        AlertDialog.Builder(this)
+            .setTitle("Zugangsdaten")
+            .setView(scroll)
+            .setPositiveButton("Speichern") { _, _ ->
+                store.server = server.text.toString().trim()
+                store.user = user.text.toString().trim()
+                store.pass = pass.text.toString()
+                store.url = m3u.text.toString().trim()
+                if (store.playlistUrl().isNotBlank()) refreshPlaylist(store.playlistUrl())
+                else status("Keine Zugangsdaten eingetragen", 3000)
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
+    // ---- EPG
+
+    private fun epgDialog() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(store.epgManual)
+            hint = "leer = automatisch"
+            setSingleLine(true)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 16, 48, 0)
+        }
+        val auto = store.epgUrl(headerEpgUrl)
+        box.addView(TextView(this).apply {
+            text = "EPG-Adresse (XMLTV, auch .gz). Leer lassen, dann nutzt die App " +
+                "automatisch die Adresse aus der Playlist oder dem Xtream-Zugang.\n" +
+                "Aktuell: " + (if (auto.isBlank()) "keine" else "gefunden") +
+                (epg?.let { "  ·  ${it.size()} Sender mit Programm" } ?: "")
+            setTextColor(Color.WHITE)
+        })
+        box.addView(input, LinearLayout.LayoutParams(-1, -2))
+        AlertDialog.Builder(this)
+            .setTitle("Programmführer (EPG)")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Speichern und laden") { _, _ ->
+                store.epgManual = input.text.toString().trim()
+                loadEpg(true)
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
+    private fun loadEpg(verbose: Boolean = false) {
+        val url = store.epgUrl(headerEpgUrl)
+        if (url.isBlank()) {
+            epg = null
+            if (verbose) status("Keine EPG-Adresse vorhanden", 3000)
+            return
+        }
+        if (verbose) status("EPG wird geladen …")
+        Thread {
+            try {
+                val loaded = openStream(url).use { Epg.load(it, System.currentTimeMillis()) }
+                handler.post {
+                    epg = loaded
+                    status("EPG geladen: ${loaded.size()} Sender", 2500)
+                    if (screen == Screen.BROWSE && browseKind == Kind.LIVE) {
+                        val pos = chanList?.selectedItemPosition ?: 0
+                        fillChannels(browseCat)
+                        chanList?.setSelection(pos.coerceAtLeast(0))
+                    }
+                }
+            } catch (t: Throwable) {
+                handler.post { status("EPG-Fehler: ${t.message}", 4000) }
+            }
+        }.start()
+    }
+
+    // ---- Hintergrundbild
+
+    private fun backgroundMenu() {
+        val items = arrayOf(
+            "Bild aus Datei oder von USB-Stick wählen",
+            "Bild von Internet-Adresse laden",
+            "Standard-Hintergrund wiederherstellen"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Hintergrundbild")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> pickBackgroundFile()
+                    1 -> backgroundFromUrl()
+                    else -> {
+                        runCatching { bgFile.delete() }
+                        applyBackground()
+                        status("Standard-Hintergrund aktiv", 2000)
+                    }
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun pickBackgroundFile() {
+        try {
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(i, pickImageCode)
+        } catch (e: Exception) {
+            status("Keine Dateiauswahl auf diesem Fernseher. Nutze die Internet-Adresse.", 5000)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != pickImageCode || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        status("Bild wird übernommen …")
+        Thread {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { readLimited(it) }
+                    ?: throw IOException("Datei nicht lesbar")
+                finishBackground(bytes)
+            } catch (t: Throwable) {
+                handler.post { status("Bild-Fehler: ${t.message}", 4000) }
+            }
+        }.start()
+    }
+
+    private fun backgroundFromUrl() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            hint = "https://…/bild.jpg"
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Internet-Adresse des Bildes")
+            .setView(input)
+            .setPositiveButton("Laden") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.isEmpty()) return@setPositiveButton
+                status("Bild wird geladen …")
+                Thread {
+                    try {
+                        val bytes = openStream(url).use { readLimited(it) }
+                        finishBackground(bytes)
+                    } catch (t: Throwable) {
+                        handler.post { status("Bild-Fehler: ${t.message}", 4000) }
+                    }
+                }.start()
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
+    private fun readLimited(input: InputStream): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(32768)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > 20_000_000) throw IOException("Bild ist zu groß")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    private fun finishBackground(bytes: ByteArray) {
+        val ok = saveBackground(bytes)
+        handler.post {
+            if (ok) {
+                applyBackground()
+                status("Hintergrundbild gesetzt", 2500)
+            } else {
+                status("Das Bild konnte nicht gelesen werden", 4000)
+            }
+        }
+    }
+
+    private fun saveBackground(bytes: ByteArray): Boolean {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= 1920 && bounds.outHeight / (sample * 2) >= 1080) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val src = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return false
+
+        val target = 16f / 9f
+        val ratio = src.width.toFloat() / src.height
+        val cw: Int
+        val ch: Int
+        if (ratio > target) {
+            ch = src.height
+            cw = (src.height * target).toInt()
+        } else {
+            cw = src.width
+            ch = (src.width / target).toInt()
+        }
+        val cropped = Bitmap.createBitmap(src, (src.width - cw) / 2, (src.height - ch) / 2, cw, ch)
+        val scaled = Bitmap.createScaledBitmap(cropped, 1920, 1080, true)
+        bgFile.outputStream().use { scaled.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        return true
+    }
+
+    // ---- Info
+
+    private fun hostOf(url: String): String =
+        try {
+            URL(url).host
+        } catch (e: Exception) {
+            "?"
+        }
+
+    private fun showInfo() {
+        val source = if (store.usesXtream()) {
+            "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
+        } else if (store.playlistUrl().isNotBlank()) {
+            "M3U: ${hostOf(store.playlistUrl())}"
+        } else "(keine)"
+        AlertDialog.Builder(this)
+            .setTitle("DJ64 1.2")
             .setMessage(
-                "Live-TV: ${count(Kind.LIVE)}\nFilme: ${count(Kind.MOVIE)}\nSerien: ${count(Kind.SERIES)}\n" +
-                    "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\n\nPlaylist:\n${store.url.ifBlank { "(keine)" }}"
+                "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
+                    "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
+                    "Tasten beim Abspielen:\n" +
+                    "• Live: Hoch/Runter = Sender wechseln, OK/Links = Liste\n" +
+                    "• Film/Serie: Links/Rechts = Spulen, OK = Pause, Hoch/Runter = App-Lautstärke\n" +
+                    "• Rote Taste = Bildschirmformat wechseln\n" +
+                    "• Zurück = zur Liste"
             )
             .setPositiveButton("OK", null)
             .show()
@@ -514,39 +942,20 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Playlist
 
-    private fun askForPlaylistUrl() {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setText(store.url)
-            hint = "http://…/playlist.m3u"
-            setSingleLine(true)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("M3U-Playlist-URL")
-            .setView(input)
-            .setPositiveButton("Speichern") { _, _ ->
-                val url = input.text.toString().trim()
-                if (url.isNotEmpty()) {
-                    store.url = url
-                    refreshPlaylist(url)
-                }
-            }
-            .setNegativeButton("Abbrechen", null)
-            .show()
-    }
-
     private fun refreshPlaylist(url: String) {
         status("Playlist wird geladen …")
         Thread {
             try {
-                val text = download(url)
+                val text = openStream(url).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val parsed = M3uParser.parse(text)
-                if (parsed.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
+                if (parsed.channels.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
                 runCatching { cacheFile.writeText(text) }
                 handler.post {
-                    channels = parsed
-                    status("${parsed.size} Einträge geladen", 2500)
+                    channels = parsed.channels
+                    headerEpgUrl = parsed.epgUrl
+                    status("${parsed.channels.size} Einträge geladen", 2500)
                     rerender()
+                    loadEpg()
                 }
             } catch (e: Exception) {
                 handler.post {
@@ -566,7 +975,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun download(urlStr: String): String {
+    private fun openStream(urlStr: String): InputStream {
         var current = urlStr
         var redirects = 0
         while (true) {
@@ -574,7 +983,7 @@ class MainActivity : Activity() {
             c.connectTimeout = 15000
             c.readTimeout = 60000
             c.instanceFollowRedirects = false
-            c.setRequestProperty("User-Agent", "DJ64/1.1")
+            c.setRequestProperty("User-Agent", "DJ64/1.2")
             val code = c.responseCode
             if (code in 300..399 && redirects < 5) {
                 val loc = c.getHeaderField("Location") ?: throw IOException("Weiterleitung ohne Ziel")
@@ -584,7 +993,7 @@ class MainActivity : Activity() {
                 continue
             }
             if (code !in 200..299) throw IOException("HTTP $code")
-            return c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            return c.inputStream
         }
     }
 
@@ -593,20 +1002,26 @@ class MainActivity : Activity() {
     private fun initPlayer() {
         if (player != null) return
         val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent("DJ64/1.1")
+            .setUserAgent("DJ64/1.2")
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
         val p = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSource))
             .build()
+        p.volume = store.volume / 100f
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
                     Player.STATE_BUFFERING -> if (screen == Screen.PLAYER) status("Lade …")
                     Player.STATE_READY -> {
                         retries = 0
-                        status(null)
+                        if (infoPending) {
+                            infoPending = false
+                            showNowInfo()
+                        } else {
+                            status(null)
+                        }
                     }
                 }
             }
@@ -625,6 +1040,20 @@ class MainActivity : Activity() {
         player = p
     }
 
+    private fun hm(ms: Long): String = SimpleDateFormat("HH:mm", Locale.GERMANY).format(Date(ms))
+
+    private fun showNowInfo() {
+        val ch = playList.getOrNull(playIndex) ?: return
+        val sb = StringBuilder(ch.name)
+        val e = epg
+        if (e != null && ch.kind == Kind.LIVE) {
+            val (cur, next) = e.nowNext(ch, System.currentTimeMillis())
+            if (cur != null) sb.append("\nJetzt: ${hm(cur.start)}–${hm(cur.stop)}  ${cur.title}")
+            if (next != null) sb.append("\nDanach: ${hm(next.start)}  ${next.title}")
+        }
+        status(sb.toString(), 5000)
+    }
+
     private fun startStream() {
         val ch = playList.getOrNull(playIndex) ?: return
         player?.apply {
@@ -640,6 +1069,7 @@ class MainActivity : Activity() {
         playIndex = index
         playKind = list[index].kind
         retries = 0
+        infoPending = true
         store.lastUrl = list[index].url
         handler.removeCallbacks(retryRunnable)
         screen = Screen.PLAYER
@@ -650,6 +1080,7 @@ class MainActivity : Activity() {
 
     private fun exitPlayer() {
         handler.removeCallbacks(retryRunnable)
+        infoPending = false
         player?.stop()
         status(null)
         val pos = playIndex
@@ -675,6 +1106,19 @@ class MainActivity : Activity() {
         status(if (p.playWhenReady) "▶ Weiter" else "⏸ Pause", 1500)
     }
 
+    private fun changeVolume(delta: Int) {
+        val v = (store.volume + delta).coerceIn(0, 100)
+        store.volume = v
+        player?.volume = v / 100f
+        status("🔊 $v %", 1200)
+    }
+
+    private fun cycleResize() {
+        store.resize = (store.resize + 1) % 3
+        applyResize()
+        status("Format: ${resizeNames[store.resize]}", 1800)
+    }
+
     // ---------------------------------------------------------------- Fernbedienung
 
     override fun onBackPressed() {
@@ -689,22 +1133,36 @@ class MainActivity : Activity() {
         if (screen != Screen.PLAYER) return super.onKeyDown(keyCode, event)
 
         val live = playKind == Kind.LIVE
+        val step = store.seekSec * 1000L
         return when (keyCode) {
             KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); true }
             KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); true }
-            KeyEvent.KEYCODE_DPAD_UP -> if (live) { zap(1); true } else true
-            KeyEvent.KEYCODE_DPAD_DOWN -> if (live) { zap(-1); true } else true
-            KeyEvent.KEYCODE_DPAD_LEFT ->
-                if (live) { exitPlayer(); true } else { seekBy(-10_000); true }
-            KeyEvent.KEYCODE_DPAD_RIGHT ->
-                if (live) true else { seekBy(10_000); true }
-            KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-30_000); true }
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(30_000); true }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (live) zap(1) else changeVolume(10)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (live) zap(-1) else changeVolume(-10)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (live) exitPlayer() else seekBy(-step)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (!live) seekBy(step)
+                true
+            }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-3 * step); true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(3 * step); true }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                 togglePause(); true
             }
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
-                if (live) { exitPlayer(); true } else { togglePause(); true }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                if (live) exitPlayer() else togglePause()
+                true
+            }
+            KeyEvent.KEYCODE_PROG_RED -> { cycleResize(); true }
             KeyEvent.KEYCODE_MENU -> { exitPlayer(); true }
             else -> super.onKeyDown(keyCode, event)
         }

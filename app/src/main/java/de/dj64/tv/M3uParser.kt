@@ -2,7 +2,15 @@ package de.dj64.tv
 
 enum class Kind { LIVE, MOVIE, SERIES }
 
-data class Channel(val name: String, val url: String, val group: String, val kind: Kind)
+data class Channel(
+    val name: String,
+    val url: String,
+    val group: String,
+    val kind: Kind,
+    val tvgId: String = ""
+)
+
+data class Playlist(val channels: List<Channel>, val epgUrl: String)
 
 object M3uParser {
     private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
@@ -24,31 +32,40 @@ object M3uParser {
         }
     }
 
-    fun parse(text: String): List<Channel> {
+    private fun attr(line: String, name: String): String =
+        attrRegex.findAll(line)
+            .firstOrNull { it.groupValues[1].equals(name, ignoreCase = true) }
+            ?.groupValues?.get(2) ?: ""
+
+    fun parse(text: String): Playlist {
         val result = ArrayList<Channel>()
         var pendingName: String? = null
         var pendingGroup = ""
+        var pendingId = ""
+        var epgUrl = ""
 
         for (raw in text.lineSequence()) {
             val line = raw.trim().removePrefix("﻿")
             if (line.isEmpty()) continue
 
-            if (line.startsWith("#EXTINF", ignoreCase = true)) {
+            if (line.startsWith("#EXTM3U", ignoreCase = true)) {
+                epgUrl = attr(line, "url-tvg").ifEmpty { attr(line, "x-tvg-url") }.substringBefore(',')
+            } else if (line.startsWith("#EXTINF", ignoreCase = true)) {
                 val lastQuote = line.lastIndexOf('"')
                 val comma = line.indexOf(',', if (lastQuote >= 0) lastQuote else 0)
                 pendingName = if (comma >= 0) line.substring(comma + 1).trim() else ""
-                pendingGroup = attrRegex.findAll(line)
-                    .firstOrNull { it.groupValues[1].equals("group-title", ignoreCase = true) }
-                    ?.groupValues?.get(2) ?: ""
+                pendingGroup = attr(line, "group-title")
+                pendingId = attr(line, "tvg-id")
             } else if (line.startsWith("#EXTGRP:", ignoreCase = true)) {
                 pendingGroup = line.substringAfter(':').trim()
             } else if (!line.startsWith("#")) {
                 val name = pendingName?.takeIf { it.isNotBlank() } ?: line
-                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup)))
+                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup), pendingId))
                 pendingName = null
                 pendingGroup = ""
+                pendingId = ""
             }
         }
-        return result
+        return Playlist(result, epgUrl)
     }
 }

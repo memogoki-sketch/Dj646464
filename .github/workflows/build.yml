@@ -27,7 +27,9 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Debug-APK bauen
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
 
       - uses: actions/upload-artifact@v4
         with:
@@ -38,8 +40,22 @@ jobs:
         run: |
           mkdir -p release
           cp app/build/outputs/apk/debug/app-debug.apk release/DJ64.apk
+          rm -f release/build-fehler.log
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add release/DJ64.apk
+          git add -A release
           git commit -m "DJ64.apk aktualisiert" || exit 0
+          git pull --rebase origin main
+          git push
+
+      - name: Fehlerprotokoll ablegen
+        if: failure()
+        run: |
+          mkdir -p release
+          grep -E "^e: |error:|FAILED|What went wrong|Execution failed|> " build.log | head -60 > release/build-fehler.log || true
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A release
+          git commit -m "Build-Fehlerprotokoll" || exit 0
+          git pull --rebase origin main
           git push

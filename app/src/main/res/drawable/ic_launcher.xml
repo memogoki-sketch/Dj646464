@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- dunkelblauer, abgerundeter Hintergrund -->
+    <path
+        android:fillColor="#0B1F4B"
+        android:pathData="M24,0 H84 A24,24 0 0 1 108,24 V84 A24,24 0 0 1 84,108 H24 A24,24 0 0 1 0,84 V24 A24,24 0 0 1 24,0 Z" />
+
+    <!-- gelber Ring -->
+    <path
+        android:pathData="M14,54 A40,40 0 1 0 94,54 A40,40 0 1 0 14,54 Z"
+        android:strokeColor="#FFD400"
+        android:strokeWidth="4" />
+
+    <!-- Schriftzug DJ64 -->
+    <path
+        android:pathData="M23,42 H28 C36,42 36,66 28,66 H23 Z"
+        android:strokeColor="#FFD400"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
+    <path
+        android:pathData="M50,42 V60 C50,66 41,66 41,60"
+        android:strokeColor="#FFD400"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
+    <path
+        android:pathData="M66,43 C58,40 55,46 55,56 C55,66 67,66 67,58 C67,50 55,50 55,56"
+        android:strokeColor="#FFD400"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
+    <path
+        android:pathData="M80,42 L72,58 H85 M80,42 V66"
+        android:strokeColor="#FFD400"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
+</vector>

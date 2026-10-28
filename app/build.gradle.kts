@@ -15,9 +15,10 @@ android {
         versionName = "1.1"
     }
 
+    // Fester Schlüssel, damit spätere Updates über die installierte App möglich sind
     signingConfigs {
         getByName("debug") {
-            storeFile = file("dj64.keystore")
+            storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"

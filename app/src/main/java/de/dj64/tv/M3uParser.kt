@@ -5,10 +5,24 @@ enum class Kind { LIVE, MOVIE, SERIES }
 data class Channel(val name: String, val url: String, val group: String, val kind: Kind)
 
 object M3uParser {
-    private val groupRegex = Regex("""group-title="([^"]*)"""", RegexOption.IGNORE_CASE)
-    private val episodeRegex = Regex("""\bS\d{1,2}\s?E\d{1,3}\b""", RegexOption.IGNORE_CASE)
-    private val seriesWords = listOf("serie", "series", "dizi", "staffel", "season")
-    private val movieWords = listOf("film", "movie", "vod", "kino", "cinema", "sinema")
+    private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
+
+    private val seriesWords = listOf("serie", "staffel", "season")
+    private val movieWords = listOf("film", "movie", "vod", "kino", "cinema")
+
+    fun classify(url: String, group: String): Kind {
+        val u = url.lowercase()
+        val g = group.lowercase()
+        val path = u.substringBefore('?')
+        return when {
+            "/series/" in u -> Kind.SERIES
+            "/movie/" in u -> Kind.MOVIE
+            seriesWords.any { it in g } -> Kind.SERIES
+            movieWords.any { it in g } -> Kind.MOVIE
+            path.endsWith(".mp4") || path.endsWith(".mkv") || path.endsWith(".avi") -> Kind.MOVIE
+            else -> Kind.LIVE
+        }
+    }
 
     fun parse(text: String): List<Channel> {
         val result = ArrayList<Channel>()
@@ -23,31 +37,18 @@ object M3uParser {
                 val lastQuote = line.lastIndexOf('"')
                 val comma = line.indexOf(',', if (lastQuote >= 0) lastQuote else 0)
                 pendingName = if (comma >= 0) line.substring(comma + 1).trim() else ""
-                pendingGroup = groupRegex.find(line)?.groupValues?.get(1) ?: ""
+                pendingGroup = attrRegex.findAll(line)
+                    .firstOrNull { it.groupValues[1].equals("group-title", ignoreCase = true) }
+                    ?.groupValues?.get(2) ?: ""
             } else if (line.startsWith("#EXTGRP:", ignoreCase = true)) {
                 pendingGroup = line.substringAfter(':').trim()
             } else if (!line.startsWith("#")) {
                 val name = pendingName?.takeIf { it.isNotBlank() } ?: line
-                result.add(Channel(name, line, pendingGroup, detectKind(line, pendingGroup, name)))
+                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup)))
                 pendingName = null
                 pendingGroup = ""
             }
         }
         return result
-    }
-
-    private fun detectKind(url: String, group: String, name: String): Kind {
-        val u = url.lowercase()
-        if (u.contains("/series/")) return Kind.SERIES
-        if (u.contains("/movie/")) return Kind.MOVIE
-
-        val g = group.lowercase()
-        if (seriesWords.any { g.contains(it) }) return Kind.SERIES
-        if (movieWords.any { g.contains(it) }) return Kind.MOVIE
-        if (episodeRegex.containsMatchIn(name)) return Kind.SERIES
-
-        val path = u.substringBefore('?')
-        if (path.endsWith(".mkv") || path.endsWith(".mp4") || path.endsWith(".avi")) return Kind.MOVIE
-        return Kind.LIVE
     }
 }

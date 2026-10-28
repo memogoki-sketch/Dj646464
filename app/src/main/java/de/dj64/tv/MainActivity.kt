@@ -2,12 +2,14 @@ package de.dj64.tv
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.StateListDrawable
+import android.net.ConnectivityManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -25,8 +27,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
-import android.widget.Toast
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -39,507 +39,496 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 @androidx.annotation.OptIn(UnstableApi::class)
 class MainActivity : Activity() {
 
-    private enum class Screen { HOME, BROWSE, PLAYER, SETTINGS }
-
-    private class Item(val icon: String, val label: String, val action: () -> Unit)
+    private enum class Screen { HOME, BROWSE, SETTINGS, PLAYER }
 
     private val navy = 0xFF0B1F4B.toInt()
-    private val navyLight = 0xFF173A7A.toInt()
+    private val navyLight = 0xFF16306B.toInt()
     private val yellow = 0xFFFFD400.toInt()
-    private val grey = 0xFFB8C4E0.toInt()
 
     private val handler = Handler(Looper.getMainLooper())
-    private val prefs by lazy { getSharedPreferences("dj64", MODE_PRIVATE) }
+    private val hideStatusRunnable = Runnable { status(null) }
+    private val retryRunnable = Runnable { startStream() }
+
+    private lateinit var store: Store
+    private lateinit var content: FrameLayout
+    private lateinit var playerView: PlayerView
+    private lateinit var statusView: TextView
     private val cacheFile by lazy { File(filesDir, "playlist.m3u") }
 
-    // ------------------------------------------------------------ Daten
+    private var player: ExoPlayer? = null
+    private var screen = Screen.HOME
 
     private var channels: List<Channel> = emptyList()
-    private var hidden: MutableSet<String> = HashSet()
-    private var favorites: MutableSet<String> = HashSet()
 
-    // Kategorien-Ansicht
+    // Browse-Zustand
     private var browseKind = Kind.LIVE
-    private var kindVisible: List<Channel> = emptyList()
-    private val cats = ArrayList<Pair<String, () -> List<Channel>>>()
-    private val catLabels = ArrayList<String>()
-    private var catIndex = 0
-    private var currentList: List<Channel> = emptyList()
+    private var browseCat = 0
+    private var catGroups: List<String> = emptyList()
+    private var currentItems: List<Channel> = emptyList()
+    private var chanList: ListView? = null
+    private var chanAdapter: ArrayAdapter<String>? = null
 
-    // Wiedergabe
+    // Wiedergabe-Zustand
     private var playList: List<Channel> = emptyList()
-    private var playPos = 0
+    private var playIndex = 0
+    private var playKind = Kind.LIVE
     private var retries = 0
-    private var resumeUrl: String? = null
-    private var resumePos = 0L
-    private var player: ExoPlayer? = null
 
-    // ------------------------------------------------------------ Ansichten
-
-    private var screen = Screen.HOME
-    private lateinit var homeView: View
-    private lateinit var browseView: View
-    private lateinit var settingsView: View
-    private lateinit var playerLayer: View
-
-    private lateinit var clockView: TextView
-    private lateinit var tileLive: View
-    private lateinit var subLive: TextView
-    private lateinit var subMovie: TextView
-    private lateinit var subSeries: TextView
-    private lateinit var homeInfo: TextView
-
-    private lateinit var browseTitle: TextView
-    private lateinit var catList: ListView
-    private lateinit var chanList: ListView
-    private lateinit var catAdapter: ArrayAdapter<String>
-    private lateinit var chanAdapter: ArrayAdapter<String>
-
-    private lateinit var settingsFirst: View
-
-    private lateinit var playerView: PlayerView
-    private lateinit var nameView: TextView
-    private lateinit var statusView: TextView
-
-    private val retryRunnable = Runnable { startPlayback() }
-    private val hideName = Runnable { nameView.visibility = View.GONE }
-    private val clockTick = object : Runnable {
-        override fun run() {
-            if (::clockView.isInitialized) {
-                clockView.text = SimpleDateFormat("EEE, dd. MMM yyyy   HH:mm", Locale.GERMANY).format(Date())
-            }
-            handler.postDelayed(this, 20_000)
-        }
-    }
-
-    // ------------------------------------------------------------ Lebenszyklus
+    // ---------------------------------------------------------------- Lebenszyklus
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        store = Store(this)
+        buildRoot()
 
-        hidden = HashSet(prefs.getStringSet("hidden", emptySet()) ?: emptySet())
-        favorites = HashSet(prefs.getStringSet("fav", emptySet()) ?: emptySet())
-
-        buildUi()
-        show(Screen.HOME)
-
-        val url = playlistUrl()
         if (cacheFile.exists()) {
-            Thread {
-                val parsed = runCatching { M3uParser.parse(cacheFile.readText()) }.getOrNull()
-                if (parsed != null) handler.post { applyChannels(parsed) }
-            }.start()
+            runCatching { channels = M3uParser.parse(cacheFile.readText()) }
         }
-        if (url.isBlank()) {
-            askForPlaylistUrl()
-        } else {
-            val age = System.currentTimeMillis() - prefs.getLong("updated", 0L)
-            if (!cacheFile.exists() || age > 6 * 3600 * 1000L) refreshPlaylist(url)
-        }
+        showHome()
+
+        val url = store.url
+        if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
     }
 
     override fun onStart() {
         super.onStart()
-        handler.post(clockTick)
-        if (screen == Screen.PLAYER) {
-            initPlayer()
-            startPlayback()
-        }
+        initPlayer()
+        if (screen == Screen.PLAYER && playList.isNotEmpty()) startStream()
     }
 
     override fun onStop() {
         super.onStop()
-        val p = player
-        if (p != null && screen == Screen.PLAYER) {
-            val ch = playList.getOrNull(playPos)
-            if (ch != null && ch.kind != Kind.LIVE) {
-                resumeUrl = ch.url
-                resumePos = p.currentPosition
-            }
-        }
         handler.removeCallbacks(retryRunnable)
-        handler.removeCallbacks(clockTick)
-        p?.release()
+        player?.release()
         player = null
     }
 
-    // ------------------------------------------------------------ Hilfsfunktionen
+    // ---------------------------------------------------------------- Grundgerüst
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    private fun lp(w: Int, h: Int, weight: Float = 0f) = LinearLayout.LayoutParams(w, h, weight)
+    private fun buildRoot() {
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-    private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
-
-    private fun groupName(c: Channel): String = c.group.ifBlank { "Ohne Kategorie" }
-
-    private fun focusBg(radius: Int): StateListDrawable {
-        val normal = GradientDrawable().apply {
-            setColor(0x33FFFFFF)
-            cornerRadius = radius.toFloat()
+        playerView = PlayerView(this).apply {
+            useController = false
+            isFocusable = false
+            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         }
-        val focused = GradientDrawable().apply {
-            setColor(navyLight)
-            cornerRadius = radius.toFloat()
-            setStroke(dp(4), yellow)
+        root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
+
+        content = FrameLayout(this).apply { setBackgroundColor(navy) }
+        root.addView(content, FrameLayout.LayoutParams(-1, -1))
+
+        statusView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setBackgroundColor(0xCC000000.toInt())
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            visibility = View.GONE
         }
-        return StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_focused), focused)
-            addState(intArrayOf(), normal)
-        }
-    }
-
-    private fun zoomOnFocus(v: View, scale: Float) {
-        v.setOnFocusChangeListener { view, hasFocus ->
-            val s = if (hasFocus) scale else 1f
-            view.animate().scaleX(s).scaleY(s).setDuration(120).start()
-        }
-    }
-
-    private fun smallButton(label: String, onClick: () -> Unit): TextView {
-        val b = TextView(this)
-        b.text = label
-        b.textSize = 18f
-        b.setTextColor(Color.WHITE)
-        b.setPadding(dp(24), dp(12), dp(24), dp(12))
-        b.isFocusable = true
-        b.isClickable = true
-        b.background = focusBg(dp(14))
-        b.setOnClickListener { onClick() }
-        zoomOnFocus(b, 1.05f)
-        return b
-    }
-
-    private fun label(text: String, size: Float, color: Int = Color.WHITE, bold: Boolean = false): TextView {
-        val t = TextView(this)
-        t.text = text
-        t.textSize = size
-        t.setTextColor(color)
-        if (bold) t.typeface = Typeface.DEFAULT_BOLD
-        return t
-    }
-
-    private fun styledAdapter(textFor: (Int, String?) -> String, highlight: (Int) -> Boolean): ArrayAdapter<String> {
-        return object : ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_list_item_1) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val v = super.getView(position, convertView, parent) as TextView
-                v.text = textFor(position, getItem(position))
-                v.setTextColor(Color.WHITE)
-                v.textSize = 20f
-                v.maxLines = 1
-                v.setPadding(dp(20), dp(14), dp(20), dp(14))
-                v.setBackgroundColor(if (highlight(position)) 0x44FFD400 else Color.TRANSPARENT)
-                return v
+        root.addView(
+            statusView,
+            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
+                setMargins(dp(16), dp(16), dp(16), dp(16))
             }
-        }
-    }
-
-    // ------------------------------------------------------------ Oberfläche bauen
-
-    private fun buildUi() {
-        val root = FrameLayout(this)
-        root.background = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(navy, 0xFF071433.toInt())
         )
-
-        homeView = buildHome()
-        browseView = buildBrowse()
-        settingsView = buildSettings()
-        playerLayer = buildPlayer()
-
-        val full = ViewGroup.LayoutParams.MATCH_PARENT
-        root.addView(homeView, FrameLayout.LayoutParams(full, full))
-        root.addView(browseView, FrameLayout.LayoutParams(full, full))
-        root.addView(settingsView, FrameLayout.LayoutParams(full, full))
-        root.addView(playerLayer, FrameLayout.LayoutParams(full, full))
         setContentView(root)
     }
 
-    private fun bigTile(icon: String, title: String, onClick: () -> Unit): Pair<View, TextView> {
-        val sub = label("", 17f, grey)
-        sub.gravity = Gravity.CENTER
-
-        val iconView = label(icon, 72f)
-        iconView.gravity = Gravity.CENTER
-
-        val titleView = label(title, 30f, Color.WHITE, true)
-        titleView.gravity = Gravity.CENTER
-        titleView.setPadding(0, dp(16), 0, dp(4))
-
-        val box = LinearLayout(this)
-        box.orientation = LinearLayout.VERTICAL
-        box.gravity = Gravity.CENTER
-        box.isFocusable = true
-        box.isClickable = true
-        box.background = focusBg(dp(24))
-        box.setOnClickListener { onClick() }
-        box.addView(iconView)
-        box.addView(titleView)
-        box.addView(sub)
-        zoomOnFocus(box, 1.06f)
-        return Pair(box, sub)
+    private fun setScreen(view: View) {
+        content.removeAllViews()
+        content.addView(view, FrameLayout.LayoutParams(-1, -1))
+        content.visibility = View.VISIBLE
     }
 
-    private fun buildHome(): View {
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(48), dp(32), dp(48), dp(32))
-
-        val top = LinearLayout(this)
-        top.orientation = LinearLayout.HORIZONTAL
-        top.gravity = Gravity.CENTER_VERTICAL
-
-        top.addView(label("DJ64", 36f, yellow, true), lp(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        clockView = label("", 18f)
-        clockView.setPadding(0, 0, dp(24), 0)
-        top.addView(clockView)
-
-        top.addView(smallButton("⟳  Aktualisieren") { refreshPlaylist(playlistUrl()) })
-        val settingsBtn = smallButton("⚙  Einstellungen") { show(Screen.SETTINGS) }
-        val settingsLp = lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        settingsLp.leftMargin = dp(12)
-        top.addView(settingsBtn, settingsLp)
-        col.addView(top)
-
-        val tiles = LinearLayout(this)
-        tiles.orientation = LinearLayout.HORIZONTAL
-
-        val live = bigTile("📺", "Live-TV") { openBrowse(Kind.LIVE) }
-        val movies = bigTile("🎬", "Filme") { openBrowse(Kind.MOVIE) }
-        val series = bigTile("🍿", "Serien") { openBrowse(Kind.SERIES) }
-        tileLive = live.first
-        subLive = live.second
-        subMovie = movies.second
-        subSeries = series.second
-
-        for (t in listOf(live.first, movies.first, series.first)) {
-            val p = lp(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-            p.setMargins(dp(12), dp(12), dp(12), dp(12))
-            tiles.addView(t, p)
+    private fun status(text: String?, autoHideMs: Long = 0) {
+        handler.removeCallbacks(hideStatusRunnable)
+        if (text.isNullOrEmpty()) {
+            statusView.visibility = View.GONE
+        } else {
+            statusView.text = text
+            statusView.visibility = View.VISIBLE
+            if (autoHideMs > 0) handler.postDelayed(hideStatusRunnable, autoHideMs)
         }
-        val tilesLp = lp(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-        tilesLp.topMargin = dp(24)
-        col.addView(tiles, tilesLp)
-
-        homeInfo = label("Playlist wird geladen …", 16f, grey)
-        homeInfo.gravity = Gravity.CENTER
-        col.addView(homeInfo, lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        return col
     }
 
-    private fun buildBrowse(): View {
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(32), dp(24), dp(32), dp(16))
+    private fun label(text: String, size: Float, color: Int = Color.WHITE, bold: Boolean = false): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = size
+            setTextColor(color)
+            if (bold) setTypeface(typeface, Typeface.BOLD)
+        }
 
-        browseTitle = label("Live-TV", 30f, yellow, true)
-        browseTitle.setPadding(dp(8), 0, 0, dp(12))
-        col.addView(browseTitle)
+    private fun tileBackground(focused: Boolean): GradientDrawable =
+        GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            setColor(if (focused) 0xFF1F4190.toInt() else navyLight)
+            setStroke(dp(if (focused) 4 else 1), if (focused) yellow else 0x55FFFFFF)
+        }
 
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
+    private fun tile(icon: String, text: String, big: Boolean, onClick: () -> Unit): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            isFocusable = true
+            isClickable = true
+            background = tileBackground(false)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setOnClickListener { onClick() }
+            setOnFocusChangeListener { v, focused ->
+                v.background = tileBackground(focused)
+                val s = if (focused) 1.06f else 1f
+                v.animate().scaleX(s).scaleY(s).setDuration(120).start()
+            }
+        }
+        val iconView = label(icon, if (big) 54f else 30f, yellow)
+        iconView.gravity = Gravity.CENTER
+        val textView = label(text, if (big) 24f else 16f, Color.WHITE, true)
+        textView.gravity = Gravity.CENTER
+        box.addView(iconView, LinearLayout.LayoutParams(-2, -2))
+        box.addView(textView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
+        return box
+    }
 
-        catAdapter = styledAdapter(
-            { pos, _ -> catLabels.getOrNull(pos) ?: "" },
-            { pos -> pos == catIndex }
+    private fun addTile(row: LinearLayout, t: View, w: Int, h: Int) {
+        row.addView(t, LinearLayout.LayoutParams(w, h).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+    }
+
+    private fun styledAdapter(): ArrayAdapter<String> =
+        object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val v = super.getView(position, convertView, parent) as TextView
+                v.setTextColor(Color.WHITE)
+                v.textSize = 18f
+                v.maxLines = 1
+                v.setPadding(dp(16), dp(12), dp(16), dp(12))
+                return v
+            }
+        }
+
+    // ---------------------------------------------------------------- Startseite
+
+    @Suppress("DEPRECATION")
+    private fun networkText(): String {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val ni = cm.activeNetworkInfo
+            when {
+                ni == null || !ni.isConnected -> "Offline"
+                ni.type == ConnectivityManager.TYPE_ETHERNET -> "LAN verbunden"
+                ni.type == ConnectivityManager.TYPE_WIFI -> "WLAN verbunden"
+                else -> "Online"
+            }
+        } catch (e: Exception) {
+            "unbekannt"
+        }
+    }
+
+    private fun count(kind: Kind): Int = channels.count { it.kind == kind }
+
+    private fun showHome() {
+        screen = Screen.HOME
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(40), dp(24), dp(40), dp(24))
+        }
+
+        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        top.addView(
+            label("DJ64", 40f, yellow, true),
+            LinearLayout.LayoutParams(0, -2, 1f)
         )
-        chanAdapter = styledAdapter({ _, item -> item ?: "" }, { false })
+        addTile(top, tile("⟳", "Aktualisieren", false) {
+            val url = store.url
+            if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
+        }, dp(150), dp(86))
+        addTile(top, tile("⚙", "Einstellungen", false) { showSettings() }, dp(150), dp(86))
+        page.addView(top, LinearLayout.LayoutParams(-1, -2))
 
-        catList = ListView(this)
-        catList.adapter = catAdapter
-        catList.divider = null
-        catList.selector = ColorDrawable(0x66FFD400)
-        catList.setBackgroundColor(0x33000000)
+        val row = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        val live = tile("📺", "Live-TV\n${count(Kind.LIVE)}", true) { showBrowse(Kind.LIVE, 0) }
+        val movies = tile("🎬", "Filme\n${count(Kind.MOVIE)}", true) { showBrowse(Kind.MOVIE, 0) }
+        val series = tile("🎞", "Serien\n${count(Kind.SERIES)}", true) { showBrowse(Kind.SERIES, 0) }
+        addTile(row, live, dp(280), dp(300))
+        addTile(row, movies, dp(280), dp(300))
+        addTile(row, series, dp(280), dp(300))
+        page.addView(row, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        page.addView(
+            label("${channels.size} Einträge  ·  ${networkText()}", 15f, 0xAAFFFFFF.toInt()),
+            LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        )
+
+        setScreen(page)
+        live.post { live.requestFocus() }
+    }
+
+    // ---------------------------------------------------------------- Liste mit Kategorien
+
+    private fun groupOf(c: Channel): String = c.group.ifBlank { "Ohne Kategorie" }
+
+    private fun visibleOfKind(kind: Kind): List<Channel> {
+        val hidden = store.hiddenGroups
+        return channels.filter { it.kind == kind && groupOf(it) !in hidden }
+    }
+
+    private fun showBrowse(kind: Kind, startCat: Int, selectPos: Int = -1) {
+        screen = Screen.BROWSE
+        browseKind = kind
+        browseCat = startCat
+
+        val title = when (kind) {
+            Kind.LIVE -> "Live-TV"
+            Kind.MOVIE -> "Filme"
+            Kind.SERIES -> "Serien"
+        }
+        val items = visibleOfKind(kind)
+        val favs = store.favoriteSet()
+        val groups = items.map { groupOf(it) }.distinct()
+        val groupCounts = items.groupingBy { groupOf(it) }.eachCount()
+
+        catGroups = listOf("", "") + groups
+        val catLabels = ArrayList<String>()
+        catLabels.add("Alle (${items.size})")
+        catLabels.add("★ Favoriten (${items.count { it.url in favs }})")
+        groups.forEach { catLabels.add("$it (${groupCounts[it] ?: 0})") }
+
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(32), dp(20), dp(32), dp(16))
+        }
+        page.addView(label(title, 30f, yellow, true), LinearLayout.LayoutParams(-2, -2))
+
+        if (channels.isEmpty() || items.isEmpty()) {
+            page.addView(
+                label(
+                    "Hier ist noch nichts. Lade die Playlist unter Einstellungen → Playlist ändern.",
+                    18f
+                ),
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(24) }
+            )
+            setScreen(page)
+            return
+        }
+
+        val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+
+        val catAdapter = styledAdapter()
+        catAdapter.addAll(catLabels)
+        val catList = ListView(this).apply {
+            adapter = catAdapter
+            setBackgroundColor(navyLight)
+            selector = ColorDrawable(0x66FFD400)
+            divider = null
+            isFocusable = true
+        }
+
+        val cAdapter = styledAdapter()
+        chanAdapter = cAdapter
+        val cList = ListView(this).apply {
+            adapter = cAdapter
+            setBackgroundColor(0xFF0F2860.toInt())
+            selector = ColorDrawable(0x66FFD400)
+            divider = null
+            isFocusable = true
+        }
+        chanList = cList
+
         catList.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                selectCategory(position)
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
+                if (pos != browseCat || currentItems.isEmpty()) fillChannels(pos)
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        catList.setOnItemClickListener { _, _, _, _ -> chanList.requestFocus() }
-
-        chanList = ListView(this)
-        chanList.adapter = chanAdapter
-        chanList.divider = null
-        chanList.selector = ColorDrawable(0x66FFD400)
-        chanList.setBackgroundColor(0x33000000)
-        chanList.setOnItemClickListener { _, _, position, _ -> playIndex(position) }
-        chanList.setOnItemLongClickListener { _, _, position, _ ->
-            toggleFavorite(position)
+        catList.setOnItemClickListener { _, _, pos, _ ->
+            fillChannels(pos)
+            cList.requestFocus()
+        }
+        cList.setOnItemClickListener { _, _, pos, _ -> play(currentItems, pos) }
+        cList.setOnItemLongClickListener { _, _, pos, _ ->
+            toggleFavorite(pos)
             true
         }
 
-        row.addView(catList, lp(dp(340), ViewGroup.LayoutParams.MATCH_PARENT))
-        val chanLp = lp(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        chanLp.leftMargin = dp(16)
-        row.addView(chanList, chanLp)
-        col.addView(row, lp(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        body.addView(catList, LinearLayout.LayoutParams(dp(320), -1).apply { rightMargin = dp(12) })
+        body.addView(cList, LinearLayout.LayoutParams(0, -1, 1f))
+        page.addView(body, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(12) })
 
-        val hint = label("OK = abspielen   ·   OK lange drücken oder Menü = Favorit ★   ·   Zurück = Startseite", 14f, grey)
-        hint.setPadding(dp(8), dp(10), 0, 0)
-        col.addView(hint)
-        return col
-    }
-
-    private fun buildSettings(): View {
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(48), dp(32), dp(48), dp(32))
-
-        val title = label("⚙  Einstellungen", 34f, Color.WHITE, true)
-        title.gravity = Gravity.CENTER
-        title.setPadding(0, 0, 0, dp(16))
-        col.addView(title)
-
-        val items = listOf(
-            Item("🌐", "Netzwerk / WLAN") { openWifi() },
-            Item("📋", "Playlist ändern") { askForPlaylistUrl() },
-            Item("🔄", "Playlist aktualisieren") {
-                refreshPlaylist(playlistUrl())
-                show(Screen.HOME)
-            },
-            Item("🧹", "Cache leeren") { clearCache() },
-            Item("🗂", "Kategorien verwalten") { manageCategories() },
-            Item("⭐", "Favoriten löschen") { clearFavorites() },
-            Item("🛠", "Systemeinstellungen") { openSystemSettings() },
-            Item("ℹ", "Info") { showInfo() }
+        page.addView(
+            label("OK lange drücken = Favorit setzen/entfernen  ·  Zurück = Startseite", 14f, 0xAAFFFFFF.toInt()),
+            LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) }
         )
 
-        var first = true
-        for (rowItems in items.chunked(3)) {
-            val row = LinearLayout(this)
-            row.orientation = LinearLayout.HORIZONTAL
-            for (i in 0 until 3) {
-                if (i < rowItems.size) {
-                    val tile = settingTile(rowItems[i])
-                    if (first) {
-                        settingsFirst = tile
-                        first = false
-                    }
-                    val p = lp(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-                    p.setMargins(dp(10), dp(10), dp(10), dp(10))
-                    row.addView(tile, p)
-                } else {
-                    row.addView(View(this), lp(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-                }
+        setScreen(page)
+
+        val cat = startCat.coerceIn(0, catLabels.size - 1)
+        fillChannels(cat)
+        catList.setSelection(cat)
+        if (selectPos >= 0) {
+            cList.setSelection(selectPos)
+            cList.post { cList.requestFocus() }
+        } else {
+            catList.post { catList.requestFocus() }
+        }
+    }
+
+    private fun fillChannels(cat: Int) {
+        browseCat = cat
+        val items = visibleOfKind(browseKind)
+        val favs = store.favoriteSet()
+        currentItems = when (cat) {
+            0 -> items
+            1 -> items.filter { it.url in favs }
+            else -> {
+                val g = catGroups.getOrNull(cat)
+                items.filter { groupOf(it) == g }
             }
-            col.addView(row, lp(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }
-        return col
+        val adapter = chanAdapter ?: return
+        adapter.clear()
+        adapter.addAll(currentItems.map { (if (it.url in favs) "★ " else "") + it.name })
+        adapter.notifyDataSetChanged()
     }
 
-    private fun settingTile(item: Item): View {
-        val icon = label(item.icon, 44f)
-        icon.gravity = Gravity.CENTER
-        val text = label(item.label, 22f, Color.WHITE, true)
-        text.gravity = Gravity.CENTER
-        text.setPadding(dp(8), dp(10), dp(8), 0)
-
-        val box = LinearLayout(this)
-        box.orientation = LinearLayout.VERTICAL
-        box.gravity = Gravity.CENTER
-        box.isFocusable = true
-        box.isClickable = true
-        box.background = focusBg(dp(20))
-        box.setOnClickListener { item.action() }
-        box.addView(icon)
-        box.addView(text)
-        zoomOnFocus(box, 1.05f)
-        return box
+    private fun toggleFavorite(pos: Int) {
+        val ch = currentItems.getOrNull(pos) ?: return
+        val now = store.toggleFavorite(ch.url)
+        status(if (now) "★ Favorit gespeichert" else "Favorit entfernt", 1500)
+        val list = chanList
+        fillChannels(browseCat)
+        val newPos = pos.coerceAtMost((currentItems.size - 1).coerceAtLeast(0))
+        list?.setSelection(newPos)
     }
 
-    private fun buildPlayer(): View {
-        val layer = FrameLayout(this)
-        layer.setBackgroundColor(Color.BLACK)
+    // ---------------------------------------------------------------- Einstellungen
 
-        playerView = PlayerView(this)
-        playerView.useController = false
-        playerView.isFocusable = false
-        playerView.setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-        layer.addView(playerView, FrameLayout.LayoutParams(-1, -1))
-
-        nameView = label("", 22f)
-        nameView.setBackgroundColor(0xAA000000.toInt())
-        nameView.setPadding(dp(20), dp(12), dp(20), dp(12))
-        val nameLp = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START)
-        nameLp.setMargins(dp(24), dp(24), dp(24), dp(24))
-        layer.addView(nameView, nameLp)
-
-        statusView = label("", 18f)
-        statusView.setBackgroundColor(0xAA000000.toInt())
-        statusView.setPadding(dp(20), dp(12), dp(20), dp(12))
-        statusView.visibility = View.GONE
-        val statusLp = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
-        statusLp.bottomMargin = dp(48)
-        layer.addView(statusView, statusLp)
-        return layer
-    }
-
-    // ------------------------------------------------------------ Navigation
-
-    private fun show(s: Screen) {
-        if (screen == Screen.PLAYER && s != Screen.PLAYER) {
-            handler.removeCallbacks(retryRunnable)
-            player?.stop()
-            player?.clearMediaItems()
-            showStatus(null)
+    private fun showSettings() {
+        screen = Screen.SETTINGS
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(40), dp(24), dp(40), dp(24))
         }
-        screen = s
-        homeView.visibility = if (s == Screen.HOME) View.VISIBLE else View.GONE
-        browseView.visibility = if (s == Screen.BROWSE) View.VISIBLE else View.GONE
-        settingsView.visibility = if (s == Screen.SETTINGS) View.VISIBLE else View.GONE
-        playerLayer.visibility = if (s == Screen.PLAYER) View.VISIBLE else View.GONE
-        when (s) {
-            Screen.HOME -> tileLive.requestFocus()
-            Screen.SETTINGS -> settingsFirst.requestFocus()
-            else -> {}
+        page.addView(label("Einstellungen", 34f, yellow, true), LinearLayout.LayoutParams(-2, -2))
+
+        val grid = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
+        val w = dp(250)
+        val h = dp(150)
+
+        val row1 = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        val netTile = tile("🌐", "Netzwerk / WLAN\n${networkText()}", false) { openNetworkSettings() }
+        addTile(row1, netTile, w, h)
+        addTile(row1, tile("📝", "Playlist ändern", false) { askForPlaylistUrl() }, w, h)
+        addTile(row1, tile("🔄", "Playlist aktualisieren", false) {
+            val url = store.url
+            if (url.isBlank()) askForPlaylistUrl() else refreshPlaylist(url)
+        }, w, h)
+        addTile(row1, tile("🗂", "Kategorien verwalten", false) { manageCategories() }, w, h)
+
+        val row2 = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        addTile(row2, tile("🧹", "Cache leeren", false) { clearCache() }, w, h)
+        addTile(row2, tile("⚙", "Weitere Einstellungen", false) { openSystemSettings() }, w, h)
+        addTile(row2, tile("ℹ", "Info", false) { showInfo() }, w, h)
+
+        grid.addView(row1, LinearLayout.LayoutParams(-2, -2))
+        grid.addView(row2, LinearLayout.LayoutParams(-2, -2))
+        page.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        setScreen(page)
+        netTile.post { netTile.requestFocus() }
+    }
+
+    private fun openNetworkSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+        } catch (e: ActivityNotFoundException) {
+            openSystemSettings()
+        } catch (e: SecurityException) {
+            openSystemSettings()
         }
     }
 
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
-        when (screen) {
-            Screen.PLAYER -> {
-                show(Screen.BROWSE)
-                chanList.requestFocus()
-                chanList.setSelection(playPos)
+    private fun openSystemSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
+        } catch (e: Exception) {
+            status("Systemeinstellungen konnten nicht geöffnet werden", 3000)
+        }
+    }
+
+    private fun manageCategories() {
+        if (channels.isEmpty()) {
+            status("Zuerst die Playlist laden", 2500)
+            return
+        }
+        val all = channels.map { groupOf(it) }.distinct().sorted()
+        val hidden = store.hiddenGroups
+        val checked = BooleanArray(all.size) { all[it] !in hidden }
+        AlertDialog.Builder(this)
+            .setTitle("Sichtbare Kategorien")
+            .setMultiChoiceItems(all.toTypedArray(), checked) { _, which, isChecked ->
+                checked[which] = isChecked
             }
-            Screen.BROWSE, Screen.SETTINGS -> show(Screen.HOME)
-            Screen.HOME -> super.onBackPressed()
-        }
+            .setPositiveButton("Speichern") { _, _ ->
+                val newHidden = HashSet<String>()
+                all.forEachIndexed { i, g -> if (!checked[i]) newHidden.add(g) }
+                store.hiddenGroups = newHidden
+                status("Kategorien gespeichert", 2000)
+            }
+            .setNeutralButton("Alle zeigen") { _, _ ->
+                store.hiddenGroups = emptySet()
+                status("Alle Kategorien sichtbar", 2000)
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
     }
 
-    // ------------------------------------------------------------ Playlist
+    private fun clearCache() {
+        runCatching { cacheFile.delete() }
+        runCatching { cacheDir.deleteRecursively() }
+        status("Cache geleert", 2000)
+        val url = store.url
+        if (url.isNotBlank()) refreshPlaylist(url)
+    }
 
-    private fun playlistUrl(): String =
-        prefs.getString("url", null)?.takeIf { it.isNotBlank() } ?: Config.DEFAULT_PLAYLIST_URL
+    private fun showInfo() {
+        AlertDialog.Builder(this)
+            .setTitle("DJ64 1.1")
+            .setMessage(
+                "Live-TV: ${count(Kind.LIVE)}\nFilme: ${count(Kind.MOVIE)}\nSerien: ${count(Kind.SERIES)}\n" +
+                    "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\n\nPlaylist:\n${store.url.ifBlank { "(keine)" }}"
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- Playlist
 
     private fun askForPlaylistUrl() {
-        val input = EditText(this)
-        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        input.setText(playlistUrl())
-        input.hint = "http://…/playlist.m3u"
-        input.setSingleLine(true)
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(store.url)
+            hint = "http://…/playlist.m3u"
+            setSingleLine(true)
+        }
         AlertDialog.Builder(this)
             .setTitle("M3U-Playlist-URL")
             .setView(input)
             .setPositiveButton("Speichern") { _, _ ->
                 val url = input.text.toString().trim()
                 if (url.isNotEmpty()) {
-                    prefs.edit().putString("url", url).apply()
+                    store.url = url
                     refreshPlaylist(url)
-                    show(Screen.HOME)
                 }
             }
             .setNegativeButton("Abbrechen", null)
@@ -547,29 +536,34 @@ class MainActivity : Activity() {
     }
 
     private fun refreshPlaylist(url: String) {
-        if (url.isBlank()) {
-            askForPlaylistUrl()
-            return
-        }
-        homeInfo.text = "Playlist wird geladen …"
+        status("Playlist wird geladen …")
         Thread {
             try {
                 val text = download(url)
                 val parsed = M3uParser.parse(text)
-                if (parsed.isEmpty()) throw IOException("Keine Sender in der Playlist gefunden")
+                if (parsed.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
                 runCatching { cacheFile.writeText(text) }
-                prefs.edit().putLong("updated", System.currentTimeMillis()).apply()
                 handler.post {
-                    applyChannels(parsed)
-                    toast("${parsed.size} Einträge geladen")
+                    channels = parsed
+                    status("${parsed.size} Einträge geladen", 2500)
+                    rerender()
                 }
             } catch (e: Exception) {
                 handler.post {
-                    homeInfo.text = "Playlist-Fehler: ${e.message}"
-                    toast("Playlist-Fehler: ${e.message}")
+                    val hint = if (channels.isEmpty()) "" else " (gespeicherte Liste bleibt aktiv)"
+                    status("Playlist-Fehler: ${e.message}$hint", 6000)
                 }
             }
         }.start()
+    }
+
+    private fun rerender() {
+        when (screen) {
+            Screen.HOME -> showHome()
+            Screen.BROWSE -> showBrowse(browseKind, 0)
+            Screen.SETTINGS -> showSettings()
+            Screen.PLAYER -> {}
+        }
     }
 
     private fun download(urlStr: String): String {
@@ -594,103 +588,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun applyChannels(list: List<Channel>) {
-        channels = list
-        updateHomeInfo()
-        if (screen == Screen.BROWSE) openBrowse(browseKind)
-    }
-
-    private fun updateHomeInfo() {
-        var live = 0
-        var movies = 0
-        var series = 0
-        for (c in channels) {
-            when (c.kind) {
-                Kind.LIVE -> live++
-                Kind.MOVIE -> movies++
-                Kind.SERIES -> series++
-            }
-        }
-        subLive.text = "$live Sender"
-        subMovie.text = "$movies Filme"
-        subSeries.text = "$series Folgen"
-        val updated = prefs.getLong("updated", 0L)
-        val stamp = if (updated > 0) SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.GERMANY).format(Date(updated)) else "–"
-        homeInfo.text = "${channels.size} Einträge   ·   zuletzt aktualisiert: $stamp"
-    }
-
-    // ------------------------------------------------------------ Kategorien und Listen
-
-    private fun openBrowse(kind: Kind) {
-        browseKind = kind
-        browseTitle.text = when (kind) {
-            Kind.LIVE -> "📺  Live-TV"
-            Kind.MOVIE -> "🎬  Filme"
-            Kind.SERIES -> "🍿  Serien"
-        }
-        buildCategories(kind)
-        catIndex = 0
-        catAdapter.clear()
-        catAdapter.addAll(catLabels)
-        catAdapter.notifyDataSetChanged()
-        show(Screen.BROWSE)
-        selectCategory(0)
-        catList.setSelection(0)
-        catList.requestFocus()
-    }
-
-    private fun buildCategories(kind: Kind) {
-        val vis = channels.filter { it.kind == kind && !hidden.contains(groupName(it)) }
-        kindVisible = vis
-        val groups = LinkedHashMap<String, MutableList<Channel>>()
-        for (c in vis) groups.getOrPut(groupName(c)) { ArrayList() }.add(c)
-
-        cats.clear()
-        catLabels.clear()
-        cats.add(Pair<String, () -> List<Channel>>("Alle", { vis }))
-        catLabels.add("Alle  (${vis.size})")
-        cats.add(Pair<String, () -> List<Channel>>("★ Favoriten", { vis.filter { favorites.contains(it.url) } }))
-        catLabels.add("★ Favoriten  (${vis.count { favorites.contains(it.url) }})")
-        for ((name, list) in groups) {
-            cats.add(Pair<String, () -> List<Channel>>(name, { list }))
-            catLabels.add("$name  (${list.size})")
-        }
-    }
-
-    private fun selectCategory(i: Int) {
-        if (i !in cats.indices) return
-        catIndex = i
-        currentList = cats[i].second()
-        refreshChannelAdapter()
-        catAdapter.notifyDataSetChanged()
-        chanList.setSelection(0)
-    }
-
-    private fun refreshChannelAdapter() {
-        chanAdapter.clear()
-        chanAdapter.addAll(currentList.map { (if (favorites.contains(it.url)) "★  " else "") + it.name })
-        chanAdapter.notifyDataSetChanged()
-    }
-
-    private fun toggleFavorite(pos: Int) {
-        val ch = currentList.getOrNull(pos) ?: return
-        if (favorites.contains(ch.url)) {
-            favorites.remove(ch.url)
-            toast("Aus Favoriten entfernt")
-        } else {
-            favorites.add(ch.url)
-            toast("★ Zu Favoriten hinzugefügt")
-        }
-        prefs.edit().putStringSet("fav", HashSet(favorites)).apply()
-
-        catLabels[1] = "★ Favoriten  (${kindVisible.count { favorites.contains(it.url) }})"
-        if (catIndex == 1) currentList = cats[1].second()
-        refreshChannelAdapter()
-        catAdapter.notifyDataSetChanged()
-        chanList.setSelection(minOf(pos, maxOf(currentList.size - 1, 0)))
-    }
-
-    // ------------------------------------------------------------ Player
+    // ---------------------------------------------------------------- Player
 
     private fun initPlayer() {
         if (player != null) return
@@ -705,22 +603,21 @@ class MainActivity : Activity() {
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 when (state) {
-                    Player.STATE_BUFFERING -> showStatus("Lade …")
+                    Player.STATE_BUFFERING -> if (screen == Screen.PLAYER) status("Lade …")
                     Player.STATE_READY -> {
                         retries = 0
-                        showStatus(null)
+                        status(null)
                     }
-                    else -> {}
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
                 if (retries < 5) {
                     retries++
-                    showStatus("Verbindung unterbrochen – neuer Versuch $retries/5 …")
+                    status("Verbindung unterbrochen – neuer Versuch $retries/5 …")
                     handler.postDelayed(retryRunnable, 3000)
                 } else {
-                    showStatus("Nicht erreichbar. Mit Zurück zur Liste.")
+                    status("Nicht erreichbar. Mit Zurück zur Liste.")
                 }
             }
         })
@@ -728,194 +625,88 @@ class MainActivity : Activity() {
         player = p
     }
 
-    private fun showStatus(text: String?) {
-        if (text.isNullOrEmpty()) {
-            statusView.visibility = View.GONE
-        } else {
-            statusView.text = text
-            statusView.visibility = View.VISIBLE
+    private fun startStream() {
+        val ch = playList.getOrNull(playIndex) ?: return
+        player?.apply {
+            setMediaItem(MediaItem.fromUri(ch.url))
+            prepare()
+            playWhenReady = true
         }
     }
 
-    private fun showName(text: String) {
-        nameView.text = text
-        nameView.visibility = View.VISIBLE
-        handler.removeCallbacks(hideName)
-        handler.postDelayed(hideName, 3500)
-    }
-
-    private fun playIndex(i: Int) {
-        if (i !in currentList.indices) return
-        playList = currentList
-        playPos = i
+    private fun play(list: List<Channel>, index: Int) {
+        if (index !in list.indices) return
+        playList = list
+        playIndex = index
+        playKind = list[index].kind
         retries = 0
-        resumeUrl = null
-        show(Screen.PLAYER)
-        initPlayer()
-        startPlayback()
+        store.lastUrl = list[index].url
+        handler.removeCallbacks(retryRunnable)
+        screen = Screen.PLAYER
+        content.visibility = View.GONE
+        status(list[index].name)
+        startStream()
     }
 
-    private fun startPlayback() {
-        val ch = playList.getOrNull(playPos) ?: return
-        prefs.edit().putString("last", ch.url).apply()
-        showName(ch.name)
-        val p = player ?: return
-        val start = if (resumeUrl == ch.url) resumePos else 0L
-        p.setMediaItem(MediaItem.fromUri(ch.url), start)
-        p.prepare()
-        p.playWhenReady = true
+    private fun exitPlayer() {
+        handler.removeCallbacks(retryRunnable)
+        player?.stop()
+        status(null)
+        val pos = playIndex
+        showBrowse(playKind, browseCat, pos)
     }
 
     private fun zap(delta: Int) {
         if (playList.isEmpty()) return
-        handler.removeCallbacks(retryRunnable)
-        playPos = (playPos + delta + playList.size) % playList.size
-        retries = 0
-        resumeUrl = null
-        startPlayback()
+        val next = ((playIndex + delta) % playList.size + playList.size) % playList.size
+        play(playList, next)
     }
 
-    private fun formatTime(ms: Long): String {
-        val total = ms / 1000
-        val h = total / 3600
-        val m = (total % 3600) / 60
-        val s = total % 60
-        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
-    }
-
-    private fun seekBy(deltaMs: Long) {
+    private fun seekBy(ms: Long) {
         val p = player ?: return
-        val target = (p.currentPosition + deltaMs).coerceAtLeast(0L)
+        val target = (p.currentPosition + ms).coerceAtLeast(0)
         p.seekTo(target)
-        val dur = p.duration
-        val total = if (dur != C.TIME_UNSET && dur > 0) " / " + formatTime(dur) else ""
-        showName("${playList.getOrNull(playPos)?.name ?: ""}\n${formatTime(target)}$total")
+        status(if (ms > 0) "⏩ +${ms / 1000} s" else "⏪ ${ms / 1000} s", 1200)
     }
 
-    // ------------------------------------------------------------ Fernbedienung
+    private fun togglePause() {
+        val p = player ?: return
+        p.playWhenReady = !p.playWhenReady
+        status(if (p.playWhenReady) "▶ Weiter" else "⏸ Pause", 1500)
+    }
+
+    // ---------------------------------------------------------------- Fernbedienung
+
+    override fun onBackPressed() {
+        when (screen) {
+            Screen.PLAYER -> exitPlayer()
+            Screen.BROWSE, Screen.SETTINGS -> showHome()
+            Screen.HOME -> super.onBackPressed()
+        }
+    }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (screen == Screen.BROWSE && keyCode == KeyEvent.KEYCODE_MENU && chanList.hasFocus()) {
-            toggleFavorite(chanList.selectedItemPosition)
-            return true
-        }
         if (screen != Screen.PLAYER) return super.onKeyDown(keyCode, event)
 
-        val isLive = playList.getOrNull(playPos)?.kind == Kind.LIVE
+        val live = playKind == Kind.LIVE
         return when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
-                zap(1)
-                true
+            KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); true }
+            KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); true }
+            KeyEvent.KEYCODE_DPAD_UP -> if (live) { zap(1); true } else true
+            KeyEvent.KEYCODE_DPAD_DOWN -> if (live) { zap(-1); true } else true
+            KeyEvent.KEYCODE_DPAD_LEFT ->
+                if (live) { exitPlayer(); true } else { seekBy(-10_000); true }
+            KeyEvent.KEYCODE_DPAD_RIGHT ->
+                if (live) true else { seekBy(10_000); true }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-30_000); true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(30_000); true }
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                togglePause(); true
             }
-            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
-                zap(-1)
-                true
-            }
-            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                if (!isLive) seekBy(10_000L)
-                true
-            }
-            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                if (!isLive) seekBy(-10_000L)
-                true
-            }
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                val p = player
-                if (p != null) {
-                    p.playWhenReady = !p.playWhenReady
-                    showName((playList.getOrNull(playPos)?.name ?: "") + if (p.playWhenReady) "" else "   ⏸")
-                }
-                true
-            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
+                if (live) { exitPlayer(); true } else { togglePause(); true }
+            KeyEvent.KEYCODE_MENU -> { exitPlayer(); true }
             else -> super.onKeyDown(keyCode, event)
         }
-    }
-
-    // ------------------------------------------------------------ Einstellungen
-
-    private fun openWifi() {
-        val actions = listOf(
-            Settings.ACTION_WIFI_SETTINGS,
-            Settings.ACTION_WIRELESS_SETTINGS,
-            Settings.ACTION_SETTINGS
-        )
-        for (a in actions) {
-            try {
-                startActivity(Intent(a))
-                return
-            } catch (e: Exception) {
-                // nächste Möglichkeit versuchen
-            }
-        }
-        toast("Netzwerk-Einstellungen nicht verfügbar")
-    }
-
-    private fun openSystemSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_SETTINGS))
-        } catch (e: Exception) {
-            toast("Systemeinstellungen nicht verfügbar")
-        }
-    }
-
-    private fun clearCache() {
-        cacheFile.delete()
-        runCatching { cacheDir.listFiles()?.forEach { it.deleteRecursively() } }
-        prefs.edit().remove("updated").apply()
-        toast("Cache geleert – Playlist wird neu geladen")
-        refreshPlaylist(playlistUrl())
-        show(Screen.HOME)
-    }
-
-    private fun clearFavorites() {
-        AlertDialog.Builder(this)
-            .setTitle("Alle Favoriten löschen?")
-            .setPositiveButton("Löschen") { _, _ ->
-                favorites = HashSet()
-                prefs.edit().remove("fav").apply()
-                toast("Favoriten gelöscht")
-            }
-            .setNegativeButton("Abbrechen", null)
-            .show()
-    }
-
-    private fun manageCategories() {
-        val names = channels.map { groupName(it) }.distinct().sorted()
-        if (names.isEmpty()) {
-            toast("Noch keine Playlist geladen")
-            return
-        }
-        val checked = BooleanArray(names.size) { !hidden.contains(names[it]) }
-        AlertDialog.Builder(this)
-            .setTitle("Kategorien anzeigen / ausblenden")
-            .setMultiChoiceItems(names.toTypedArray(), checked) { _, which, isChecked ->
-                checked[which] = isChecked
-            }
-            .setPositiveButton("Speichern") { _, _ ->
-                val h = HashSet<String>()
-                names.forEachIndexed { i, n -> if (!checked[i]) h.add(n) }
-                hidden = h
-                prefs.edit().putStringSet("hidden", HashSet(h)).apply()
-                toast("Gespeichert")
-            }
-            .setNegativeButton("Abbrechen", null)
-            .show()
-    }
-
-    private fun showInfo() {
-        val live = channels.count { it.kind == Kind.LIVE }
-        val movies = channels.count { it.kind == Kind.MOVIE }
-        val series = channels.count { it.kind == Kind.SERIES }
-        val host = runCatching { URL(playlistUrl()).host }.getOrDefault("–")
-        AlertDialog.Builder(this)
-            .setTitle("DJ64  ·  Version 1.1")
-            .setMessage(
-                "Live-Sender: $live\nFilme: $movies\nSerien-Folgen: $series\n" +
-                    "Favoriten: ${favorites.size}\nAusgeblendete Kategorien: ${hidden.size}\n" +
-                    "Playlist-Server: $host"
-            )
-            .setPositiveButton("OK", null)
-            .show()
     }
 }

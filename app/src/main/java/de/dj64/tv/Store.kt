@@ -61,6 +61,15 @@ class Store(context: Context) {
     var resize: Int // 0 = Anpassen, 1 = Gestreckt, 2 = Zoom
         get() = p.getInt("resize", 0)
         set(value) = p.edit().putInt("resize", value).apply()
+    var theme: Int // 0 = Blau-Gelb, 1 = Violett, 2 = Grün
+        get() = p.getInt("theme", 0)
+        set(value) = p.edit().putInt("theme", value).apply()
+    var fontStyle: Int // 0 = Modern, 1 = Kompakt, 2 = Klassisch
+        get() = p.getInt("font", 0)
+        set(value) = p.edit().putInt("font", value).apply()
+    var margin: Int // Bildrand (Overscan), Index 0..4
+        get() = p.getInt("margin", 0)
+        set(value) = p.edit().putInt("margin", value).apply()
     var uiScale: Float
         get() = p.getFloat("uiScale", 1f)
         set(value) = p.edit().putFloat("uiScale", value).apply()

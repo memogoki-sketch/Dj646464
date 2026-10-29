@@ -8,7 +8,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.zip.GZIPInputStream
 
-class Prog(val start: Long, val stop: Long, val title: String)
+class Prog(val start: Long, val stop: Long, val title: String, val desc: String)
 
 class Epg(
     private val byId: Map<String, List<Prog>>,
@@ -31,6 +31,13 @@ class Epg(
         val after = cur?.stop ?: now
         val next = l.firstOrNull { it.start >= after }
         return Pair(cur, next)
+    }
+
+    fun upcoming(c: Channel, now: Long, n: Int): Pair<Prog?, List<Prog>> {
+        val l = listFor(c) ?: return Pair(null, emptyList())
+        val cur = l.firstOrNull { it.start <= now && now < it.stop }
+        val after = cur?.stop ?: now
+        return Pair(cur, l.filter { it.start >= after }.take(n))
     }
 
     companion object {
@@ -72,6 +79,7 @@ class Epg(
             var progStart = -1L
             var progStop = -1L
             var progTitle: String? = null
+            var progDesc = ""
             var tag = ""
 
             var ev = parser.eventType
@@ -86,6 +94,7 @@ class Epg(
                             progStart = time(parser.getAttributeValue(null, "start"))
                             progStop = time(parser.getAttributeValue(null, "stop"))
                             progTitle = null
+                            progDesc = ""
                         }
                     }
                     XmlPullParser.TEXT -> {
@@ -96,6 +105,8 @@ class Epg(
                             if (key.isNotEmpty() && !nameToId.containsKey(key)) nameToId[key] = cid
                         } else if (tag == "title" && progChannel != null && progTitle == null) {
                             progTitle = txt.trim()
+                        } else if (tag == "desc" && progChannel != null && progDesc.isEmpty()) {
+                            progDesc = txt.trim().take(400)
                         }
                     }
                     XmlPullParser.END_TAG -> {
@@ -106,7 +117,7 @@ class Epg(
                             val ch = progChannel
                             val title = progTitle
                             if (ch != null && title != null && progStop > from && progStart < to) {
-                                byId.getOrPut(ch) { ArrayList() }.add(Prog(progStart, progStop, title))
+                                byId.getOrPut(ch) { ArrayList() }.add(Prog(progStart, progStop, title, progDesc))
                             }
                             progChannel = null
                         }

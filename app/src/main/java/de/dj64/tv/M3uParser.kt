@@ -7,7 +7,8 @@ data class Channel(
     val url: String,
     val group: String,
     val kind: Kind,
-    val tvgId: String = ""
+    val tvgId: String = "",
+    val logo: String = ""
 )
 
 data class Playlist(val channels: List<Channel>, val epgUrl: String)
@@ -42,6 +43,7 @@ object M3uParser {
         var pendingName: String? = null
         var pendingGroup = ""
         var pendingId = ""
+        var pendingLogo = ""
         var epgUrl = ""
 
         for (raw in text.lineSequence()) {
@@ -56,14 +58,16 @@ object M3uParser {
                 pendingName = if (comma >= 0) line.substring(comma + 1).trim() else ""
                 pendingGroup = attr(line, "group-title")
                 pendingId = attr(line, "tvg-id")
+                pendingLogo = attr(line, "tvg-logo")
             } else if (line.startsWith("#EXTGRP:", ignoreCase = true)) {
                 pendingGroup = line.substringAfter(':').trim()
             } else if (!line.startsWith("#")) {
                 val name = pendingName?.takeIf { it.isNotBlank() } ?: line
-                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup), pendingId))
+                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup), pendingId, pendingLogo))
                 pendingName = null
                 pendingGroup = ""
                 pendingId = ""
+                pendingLogo = ""
             }
         }
         return Playlist(result, epgUrl)

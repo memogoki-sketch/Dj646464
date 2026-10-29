@@ -1,0 +1,43 @@
+name: APK bauen
+
+# Baut die Android-App automatisch. Start: Reiter "Actions" -> "APK bauen" -> "Run workflow".
+# Die fertige APK liegt danach unten auf der Seite des Laufs unter "Artifacts".
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, apk-build]
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Oberfläche in die App kopieren
+        run: node tools/sync-android.js
+
+      - name: Tests der Nachrichten-Logik
+        run: node test/test.js
+
+      - name: APK bauen
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fenerbahce-News-APK
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

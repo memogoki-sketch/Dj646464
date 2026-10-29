@@ -1,0 +1,22 @@
+{
+  "_hinweis": "Platzhalter-Beispiel. Echte Spiele in fixtures.json eintragen. Ohne Ergebnis = anstehend, mit homeScore/awayScore = Ergebnis. sport: futbol | basketbol | voleybol | diger. Datum mit Zeitzone, z. B. +03:00.",
+  "fixtures": [
+    {
+      "sport": "futbol",
+      "competition": "Beispiel-Liga",
+      "home": "Fenerbahçe",
+      "away": "Gegner A",
+      "date": "2030-01-01T18:00:00+03:00",
+      "venue": "Beispiel-Stadion"
+    },
+    {
+      "sport": "basketbol",
+      "competition": "Beispiel-Wettbewerb",
+      "home": "Gegner B",
+      "away": "Fenerbahçe",
+      "date": "2020-01-01T20:00:00+03:00",
+      "homeScore": 80,
+      "awayScore": 85
+    }
+  ]
+}

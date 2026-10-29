@@ -1,15 +1,21 @@
 name: APK bauen
 
 # Baut die Android-App automatisch. Start: Reiter "Actions" -> "APK bauen" -> "Run workflow".
-# Die fertige APK liegt danach unten auf der Seite des Laufs unter "Artifacts".
+# Ergebnis: Die fertige APK liegt danach im Ordner "release" (Datei Fenerbahce-News.apk)
+# und zusätzlich unter "Artifacts" auf der Seite des Laufs. Das Kurzprotokoll steht in release/build-log.txt.
 on:
   workflow_dispatch:
   push:
     branches: [main, master, apk-build]
+    paths-ignore:
+      - "release/**"
+
+permissions:
+  contents: write
 
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -20,9 +26,14 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Android-Lizenzen akzeptieren (SDK ist auf dem Runner vorinstalliert)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Oberfläche in die App kopieren
         run: node tools/sync-android.js
@@ -30,14 +41,31 @@ jobs:
       - name: Tests der Nachrichten-Logik
         run: node test/test.js
 
-      - name: APK bauen
+      - name: Debug-APK bauen
+        id: build
+        continue-on-error: true
         working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace > ../build.log 2>&1
+
+      - name: Ergebnis im Repository ablegen
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          mkdir -p release
+          rm -f release/Fenerbahce-News.apk
+          { echo "Ergebnis: ${{ steps.build.outcome }}"; grep -E "^e: |error:|FAILED|What went wrong|Caused by" -A4 build.log | head -120; echo "--- Ende des Logs:"; tail -25 build.log; } > release/build-log.txt || true
+          APK=$(ls android/app/build/outputs/apk/debug/*.apk 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then cp "$APK" release/Fenerbahce-News.apk; fi
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A release
+          git commit -m "APK-Bau: Ergebnis ${{ steps.build.outcome }}" || exit 0
+          git push
 
       - uses: actions/upload-artifact@v4
         with:
           name: Fenerbahce-News-APK
           path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
+
+      - name: Fehlschlag melden
+        if: steps.build.outcome == 'failure'
+        run: exit 1

@@ -74,6 +74,50 @@ class Store(context: Context) {
         get() = p.getFloat("uiScale", 1f)
         set(value) = p.edit().putFloat("uiScale", value).apply()
 
+    // ---- Leistung, Wetter, Start
+    var bufLevel: Int // 0 klein, 1 normal, 2 groß, 3 sehr groß
+        get() = p.getInt("buf", 1)
+        set(value) = p.edit().putInt("buf", value).apply()
+    var bufAuto: Boolean
+        get() = p.getBoolean("bufAuto", true)
+        set(value) = p.edit().putBoolean("bufAuto", value).apply()
+    var retryIdx: Int
+        get() = p.getInt("retryIdx", 1)
+        set(value) = p.edit().putInt("retryIdx", value).apply()
+    var preview: Boolean
+        get() = p.getBoolean("preview", true)
+        set(value) = p.edit().putBoolean("preview", value).apply()
+    var previewDelayIdx: Int
+        get() = p.getInt("pdelay", 1)
+        set(value) = p.edit().putInt("pdelay", value).apply()
+    var logos: Boolean
+        get() = p.getBoolean("logos", true)
+        set(value) = p.edit().putBoolean("logos", value).apply()
+    var epgAuto: Boolean
+        get() = p.getBoolean("epgAuto", true)
+        set(value) = p.edit().putBoolean("epgAuto", value).apply()
+    var introMode: Int // 0 voll, 1 kurz, 2 aus
+        get() = p.getInt("intro", 0)
+        set(value) = p.edit().putInt("intro", value).apply()
+    var wxName: String
+        get() = str("wxName")
+        set(value) = put("wxName", value)
+    var wxLat: Float
+        get() = p.getFloat("wxLat", 0f)
+        set(value) = p.edit().putFloat("wxLat", value).apply()
+    var wxLon: Float
+        get() = p.getFloat("wxLon", 0f)
+        set(value) = p.edit().putFloat("wxLon", value).apply()
+    var wxFahrenheit: Boolean
+        get() = p.getBoolean("wxF", false)
+        set(value) = p.edit().putBoolean("wxF", value).apply()
+    var wxCache: String
+        get() = str("wxCache")
+        set(value) = put("wxCache", value)
+    var wxTime: Long
+        get() = p.getLong("wxTime", 0L)
+        set(value) = p.edit().putLong("wxTime", value).apply()
+
     // ---- Merkliste
     var lastUrl: String?
         get() = p.getString("last", null)

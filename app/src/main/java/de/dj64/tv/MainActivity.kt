@@ -66,8 +66,37 @@ class MainActivity : Activity() {
     private val themes = listOf(
         AppTheme("DJ64 Blau-Gelb", 0xFFFFD400.toInt(), intArrayOf(0xFF0B1F4B.toInt(), 0xFF14307A.toInt(), 0xFF0B1F4B.toInt())),
         AppTheme("Mitternacht Violett", 0xFFB388FF.toInt(), intArrayOf(0xFF120B2E.toInt(), 0xFF2A1560.toInt(), 0xFF120B2E.toInt())),
-        AppTheme("Dunkel Grün", 0xFF00E5A0.toInt(), intArrayOf(0xFF08201C.toInt(), 0xFF0F3D35.toInt(), 0xFF08201C.toInt()))
+        AppTheme("Dunkel Grün", 0xFF00E5A0.toInt(), intArrayOf(0xFF08201C.toInt(), 0xFF0F3D35.toInt(), 0xFF08201C.toInt())),
+        AppTheme("Rubin Rot", 0xFFFF5A6E.toInt(), intArrayOf(0xFF2A0912.toInt(), 0xFF5C1424.toInt(), 0xFF2A0912.toInt())),
+        AppTheme("Sonnenuntergang", 0xFFFF9A3D.toInt(), intArrayOf(0xFF2A1206.toInt(), 0xFF6A2E12.toInt(), 0xFF2A1206.toInt())),
+        AppTheme("Ozean Cyan", 0xFF2DD4F0.toInt(), intArrayOf(0xFF04202B.toInt(), 0xFF0B4A5E.toInt(), 0xFF04202B.toInt())),
+        AppTheme("Schwarz (OLED)", 0xFF7CF29A.toInt(), intArrayOf(0xFF000000.toInt(), 0xFF0B0B0D.toInt(), 0xFF000000.toInt())),
+        AppTheme("Graphit Gold", 0xFFFFB300.toInt(), intArrayOf(0xFF16171B.toInt(), 0xFF2C2F38.toInt(), 0xFF16171B.toInt()))
     )
+    private val bufNames = arrayOf("Klein (geringe Verzögerung)", "Normal", "Groß (stabiler)", "Sehr groß (schwache Leitung)")
+    private val retryNames = arrayOf("3 Versuche", "5 Versuche", "10 Versuche", "Unbegrenzt")
+    private val retryValues = intArrayOf(3, 5, 10, Int.MAX_VALUE)
+    private val previewDelays = arrayOf(0.4, 0.7, 1.0, 1.5)
+    private val introNames = arrayOf("Voll (5,6 Sekunden)", "Kurz (3,5 Sekunden)", "Aus")
+    private val bufMin = intArrayOf(5000, 15000, 30000, 50000)
+    private val bufMax = intArrayOf(15000, 50000, 90000, 150000)
+    private val bufPlay = intArrayOf(1000, 1500, 2500, 4000)
+    private val bufRe = intArrayOf(2000, 3000, 5000, 8000)
+    private val stallSec = intArrayOf(10, 15, 20, 30)
+    private var bufBoost = 0
+    private var introView: IntroView? = null
+    private var weatherTitle: TextView? = null
+    private val boostRunnable = Runnable {
+        if (store.bufAuto && effectiveBuf() < 3 && streamChannel != null) {
+            bufBoost++
+            status("Puffer wird vergrößert: ${bufNames[effectiveBuf()]}", 3000)
+            restartPlayer()
+        }
+    }
+    private val stallRunnable = Runnable {
+        val live = playKind == Kind.LIVE || screen == Screen.BROWSE
+        if (live && streamChannel != null) startStream()
+    }
     private val fontNames = listOf("Modern", "Kompakt", "Klassisch")
     private val marginNames = listOf("Aus", "Klein", "Mittel", "Groß", "Sehr groß")
     private val marginDp = listOf(0, 12, 24, 36, 48)
@@ -83,7 +112,7 @@ class MainActivity : Activity() {
     private val retryRunnable = Runnable { startStream() }
     private val previewRunnable = Runnable {
         val ch = pendingPreview
-        if (ch != null && screen == Screen.BROWSE && browseKind == Kind.LIVE) loadStream(ch, false)
+        if (ch != null && store.preview && screen == Screen.BROWSE && browseKind == Kind.LIVE) loadStream(ch, false)
     }
     private val clockRunnable = object : Runnable {
         override fun run() {
@@ -156,10 +185,12 @@ class MainActivity : Activity() {
             }
         }
         showHome()
-        loadEpg()
+        if (store.epgAuto) loadEpg()
+        loadWeather(false)
 
         val url = store.playlistUrl()
-        if (url.isBlank()) showAccountDialog() else refreshPlaylist(url)
+        if (url.isNotBlank()) refreshPlaylist(url)
+        startIntro { if (url.isBlank()) showAccountDialog() }
     }
 
     override fun onStart() {
@@ -175,6 +206,8 @@ class MainActivity : Activity() {
         super.onStop()
         handler.removeCallbacks(retryRunnable)
         handler.removeCallbacks(previewRunnable)
+        handler.removeCallbacks(boostRunnable)
+        handler.removeCallbacks(stallRunnable)
         player?.release()
         player = null
     }
@@ -469,7 +502,9 @@ class MainActivity : Activity() {
         val glass: IntArray? = null
         botRow.addView(smallTile(R.drawable.ic_heart, "Favoriten", glass) { showBrowse(Kind.LIVE, 1) }, lpMargin(0, -1, 1f, dp(7)))
         botRow.addView(smallTile(R.drawable.ic_settings, "Einstellungen", glass) { showSettings() }, lpMargin(0, -1, 1f, dp(7)))
-        botRow.addView(smallTile(R.drawable.ic_user, "Zugangsdaten", glass) { showAccountDialog() }, lpMargin(0, -1, 1f, dp(7)))
+        val wxTile = smallTile(R.drawable.ic_weather, weatherLabel(), glass) { showWeather() }
+        weatherTitle = wxTile.getChildAt(1) as? TextView
+        botRow.addView(wxTile, lpMargin(0, -1, 1f, dp(7)))
         right.addView(botRow, lp(-1, 0, 1f))
         grid.addView(right, lp(0, -1, 2f))
         page.addView(grid, lp(-1, 0, 1f))
@@ -537,7 +572,7 @@ class MainActivity : Activity() {
                 if (cur != null) sub = cur.title
             }
             row.sub.text = sub
-            Logos.load(c.logo, row.logo)
+            if (store.logos) Logos.load(c.logo, row.logo) else row.logo.setImageDrawable(null)
             return v
         }
     }
@@ -893,7 +928,8 @@ class MainActivity : Activity() {
     private fun schedulePreview(ch: Channel) {
         pendingPreview = ch
         handler.removeCallbacks(previewRunnable)
-        handler.postDelayed(previewRunnable, 700)
+        if (!store.preview) return
+        handler.postDelayed(previewRunnable, (previewDelays[store.previewDelayIdx.coerceIn(0, 3)] * 1000).toLong())
     }
 
     // ---------------------------------------------------------------- Einstellungen
@@ -944,9 +980,15 @@ class MainActivity : Activity() {
         )
         grid.addView(
             row(
+                st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
+                st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_settings, "Weitere Einstellungen", "Android-System") { openSystemSettings() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.3") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.4") { showInfo() }
+            )
+        )
+        grid.addView(
+            row(
+                st(R.drawable.ic_settings, "Weitere Einstellungen", "Android-System") { openSystemSettings() }
             )
         )
 
@@ -1414,6 +1456,264 @@ class MainActivity : Activity() {
             "?"
         }
 
+
+    // ---------------------------------------------------------------- Startanimation
+
+    private fun startIntro(done: () -> Unit) {
+        val mode = store.introMode
+        if (mode == 2) { done(); return }
+        val th = themes[store.theme.coerceIn(0, themes.size - 1)]
+        val v = IntroView(this, th.accent, th.bg[0], mode == 1) {
+            introView?.let { root.removeView(it) }
+            introView = null
+            done()
+        }
+        introView = v
+        root.addView(v, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    private fun skipIntro(): Boolean {
+        val v = introView ?: return false
+        v.skip()
+        return true
+    }
+
+    // ---------------------------------------------------------------- Wetter
+
+    private fun wmo(code: Int): String = when (code) {
+        0 -> "Klar"; 1 -> "Überwiegend klar"; 2 -> "Teils bewölkt"; 3 -> "Bedeckt"
+        45, 48 -> "Nebel"
+        51, 53, 55, 56, 57 -> "Nieselregen"
+        61 -> "Leichter Regen"; 63 -> "Regen"; 65 -> "Starker Regen"; 66, 67 -> "Gefrierender Regen"
+        71, 73, 75, 77 -> "Schneefall"
+        80, 81, 82 -> "Regenschauer"
+        85, 86 -> "Schneeschauer"
+        95 -> "Gewitter"; 96, 99 -> "Gewitter mit Hagel"
+        else -> "Wetter"
+    }
+
+    private fun weatherLabel(): String {
+        if (store.wxName.isBlank()) return "Wetter"
+        val j = runCatching { org.json.JSONObject(store.wxCache) }.getOrNull() ?: return store.wxName
+        val cur = j.optJSONObject("current") ?: return store.wxName
+        return "${Math.round(cur.optDouble("temperature_2m"))}° · ${store.wxName}"
+    }
+
+    private fun updateWeatherTile() {
+        val tv = weatherTitle ?: return
+        if (screen == Screen.HOME) tv.text = weatherLabel()
+    }
+
+    private fun loadWeather(force: Boolean) {
+        if (store.wxName.isBlank()) return
+        if (!force && store.wxCache.isNotBlank() && System.currentTimeMillis() - store.wxTime < 30 * 60_000L) return
+        val f = store.wxFahrenheit
+        val url = "https://api.open-meteo.com/v1/forecast?latitude=${store.wxLat}&longitude=${store.wxLon}" +
+            "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m" +
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=4" +
+            (if (f) "&temperature_unit=fahrenheit&wind_speed_unit=mph" else "")
+        Thread {
+            try {
+                val text = openStream(url).use { String(it.readBytes(), Charsets.UTF_8) }
+                org.json.JSONObject(text)
+                handler.post {
+                    store.wxCache = text
+                    store.wxTime = System.currentTimeMillis()
+                    updateWeatherTile()
+                }
+            } catch (t: Throwable) {
+                handler.post { if (force) status("Wetter-Fehler: ${t.message}", 4000) }
+            }
+        }.start()
+    }
+
+    private fun showWeather() {
+        if (store.wxName.isBlank()) { pickCity(); return }
+        val j = runCatching { org.json.JSONObject(store.wxCache) }.getOrNull()
+        val cur = j?.optJSONObject("current")
+        val msg = if (cur == null) {
+            "Keine Wetterdaten vorhanden.\nOrt: ${store.wxName}"
+        } else {
+            val u = if (store.wxFahrenheit) "°F" else "°C"
+            val ws = if (store.wxFahrenheit) "mph" else "km/h"
+            val sb = StringBuilder()
+            sb.append("${store.wxName}\n\n")
+            sb.append("${Math.round(cur.optDouble("temperature_2m"))}$u  ·  ${wmo(cur.optInt("weather_code"))}\n")
+            sb.append("Gefühlt ${Math.round(cur.optDouble("apparent_temperature"))}$u  ·  Wind ${Math.round(cur.optDouble("wind_speed_10m"))} $ws  ·  Luftfeuchte ${cur.optInt("relative_humidity_2m")} %\n\n")
+            val d = j!!.optJSONObject("daily")
+            if (d != null) {
+                val days = d.optJSONArray("time")
+                for (i in 0 until (days?.length() ?: 0)) {
+                    val name = when (i) {
+                        0 -> "Heute"
+                        1 -> "Morgen"
+                        else -> {
+                            val dt = SimpleDateFormat("yyyy-MM-dd", Locale.GERMANY).parse(days!!.getString(i))
+                            SimpleDateFormat("EEEE", Locale.GERMANY).format(dt!!)
+                        }
+                    }
+                    val rain = d.optJSONArray("precipitation_probability_max")?.optInt(i, -1) ?: -1
+                    sb.append(
+                        "$name:  ${Math.round(d.getJSONArray("temperature_2m_min").getDouble(i))}° / ${Math.round(d.getJSONArray("temperature_2m_max").getDouble(i))}°  " +
+                            "${wmo(d.getJSONArray("weather_code").getInt(i))}${if (rain >= 0) " ($rain %)" else ""}\n"
+                    )
+                }
+            }
+            sb.toString()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Wetter")
+            .setMessage(msg)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Ort ändern") { _, _ -> pickCity() }
+            .setNegativeButton("Aktualisieren") { _, _ -> loadWeather(true) }
+            .show()
+    }
+
+    private fun pickCity() {
+        val input = EditText(this).apply {
+            hint = "Stadt oder Ort, z. B. Hamburg"
+            setSingleLine()
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Ort für das Wetter")
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("Suchen") { _, _ ->
+                val q = input.text.toString().trim()
+                if (q.isNotEmpty()) searchCity(q)
+            }
+            .show()
+    }
+
+    private fun searchCity(q: String) {
+        status("Suche …")
+        Thread {
+            try {
+                val url = "https://geocoding-api.open-meteo.com/v1/search?name=${java.net.URLEncoder.encode(q, "UTF-8")}&count=6&language=de&format=json"
+                val text = openStream(url).use { String(it.readBytes(), Charsets.UTF_8) }
+                val arr = org.json.JSONObject(text).optJSONArray("results")
+                handler.post {
+                    status(null)
+                    if (arr == null || arr.length() == 0) {
+                        status("Nichts gefunden.", 3000)
+                        return@post
+                    }
+                    val names = ArrayList<String>()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        names.add(listOf(o.optString("name"), o.optString("admin1"), o.optString("country")).filter { it.isNotBlank() }.joinToString(", "))
+                    }
+                    AlertDialog.Builder(this)
+                        .setTitle("Ort wählen")
+                        .setItems(names.toTypedArray()) { _, which ->
+                            val o = arr.getJSONObject(which)
+                            store.wxName = o.optString("name")
+                            store.wxLat = o.optDouble("latitude").toFloat()
+                            store.wxLon = o.optDouble("longitude").toFloat()
+                            store.wxCache = ""
+                            store.wxTime = 0L
+                            status("Ort gespeichert: ${store.wxName}", 2500)
+                            updateWeatherTile()
+                            loadWeather(true)
+                            if (screen == Screen.SETTINGS) showSettings()
+                        }
+                        .setNegativeButton("Abbrechen", null)
+                        .show()
+                }
+            } catch (t: Throwable) {
+                handler.post { status("Fehler: ${t.message}", 4000) }
+            }
+        }.start()
+    }
+
+    private fun weatherSettings() {
+        val items = arrayOf(
+            "Ort: ${if (store.wxName.isBlank()) "nicht gewählt" else store.wxName}",
+            "Einheit: ${if (store.wxFahrenheit) "°F" else "°C"}",
+            "Wetter anzeigen"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Wetter")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> pickCity()
+                    1 -> {
+                        store.wxFahrenheit = !store.wxFahrenheit
+                        store.wxCache = ""; store.wxTime = 0L
+                        loadWeather(true)
+                        weatherSettings()
+                    }
+                    2 -> showWeather()
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- Leistung
+
+    private fun onOff(b: Boolean) = if (b) "An" else "Aus"
+
+    private fun perfMenu() {
+        val items = arrayOf(
+            "Puffergröße: ${bufNames[store.bufLevel.coerceIn(0, 3)]}",
+            "Puffer bei Stockern automatisch vergrößern: ${onOff(store.bufAuto)}",
+            "Wiederverbindung: ${retryNames[store.retryIdx.coerceIn(0, 3)]}",
+            "Live-Vorschau in der Liste: ${onOff(store.preview)}",
+            "Verzögerung der Vorschau: ${previewDelays[store.previewDelayIdx.coerceIn(0, 3)]} s",
+            "Senderlogos laden: ${onOff(store.logos)}",
+            "Programmführer automatisch laden: ${onOff(store.epgAuto)}",
+            "Startanimation: ${introNames[store.introMode.coerceIn(0, 2)]}",
+            "Startanimation jetzt ansehen"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Leistung")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> choose("Puffergröße", bufNames, store.bufLevel) { store.bufLevel = it; bufBoost = 0; restartPlayer() }
+                    1 -> { store.bufAuto = !store.bufAuto; perfMenu() }
+                    2 -> choose("Wiederverbindung", retryNames, store.retryIdx) { store.retryIdx = it }
+                    3 -> { store.preview = !store.preview; perfMenu() }
+                    4 -> choose("Verzögerung der Vorschau", previewDelays.map { "$it Sekunden" }.toTypedArray(), store.previewDelayIdx) { store.previewDelayIdx = it }
+                    5 -> { store.logos = !store.logos; perfMenu() }
+                    6 -> { store.epgAuto = !store.epgAuto; perfMenu() }
+                    7 -> choose("Startanimation", introNames, store.introMode) { store.introMode = it }
+                    8 -> {
+                        val keep = store.introMode
+                        if (keep == 2) store.introMode = 0
+                        startIntro { store.introMode = keep }
+                    }
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun choose(title: String, names: Array<String>, cur: Int, apply: (Int) -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(names, cur) { d, which ->
+                apply(which)
+                d.dismiss()
+                perfMenu()
+            }
+            .setNegativeButton("Abbrechen") { _, _ -> perfMenu() }
+            .show()
+    }
+
+    private fun restartPlayer() {
+        if (player == null) return
+        player?.release()
+        player = null
+        initPlayer()
+        val ch = streamChannel
+        if (ch != null && (screen == Screen.PLAYER || (screen == Screen.BROWSE && browseKind == Kind.LIVE))) loadStream(ch, true)
+    }
+
+    private fun effectiveBuf(): Int = (store.bufLevel + bufBoost).coerceIn(0, 3)
+
     private fun showInfo() {
         val source = if (store.usesXtream()) {
             "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
@@ -1421,7 +1721,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.3")
+            .setTitle("DJ64 1.4")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -1500,18 +1800,34 @@ class MainActivity : Activity() {
     private fun initPlayer() {
         if (player != null) return
         val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent("DJ64/1.3")
+            .setUserAgent("DJ64/1.4")
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
+        val lvl = effectiveBuf()
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(bufMin[lvl], bufMax[lvl], bufPlay[lvl], bufRe[lvl])
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
         val p = ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSource))
             .build()
         p.volume = store.volume / 100f
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                if (state != Player.STATE_BUFFERING) {
+                    handler.removeCallbacks(boostRunnable)
+                    handler.removeCallbacks(stallRunnable)
+                }
                 when (state) {
-                    Player.STATE_BUFFERING -> if (screen == Screen.PLAYER) status("Lade …")
+                    Player.STATE_BUFFERING -> {
+                        if (screen == Screen.PLAYER) status("Lade …")
+                        handler.removeCallbacks(boostRunnable)
+                        handler.removeCallbacks(stallRunnable)
+                        handler.postDelayed(boostRunnable, 6000)
+                        handler.postDelayed(stallRunnable, stallSec[effectiveBuf()] * 1000L)
+                    }
                     Player.STATE_READY -> {
                         retries = 0
                         if (infoPending && screen == Screen.PLAYER) {
@@ -1525,9 +1841,10 @@ class MainActivity : Activity() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                if (retries < 5) {
+                val maxR = retryValues[store.retryIdx.coerceIn(0, 3)]
+                if (retries < maxR) {
                     retries++
-                    status("Verbindung unterbrochen – neuer Versuch $retries/5 …")
+                    status("Verbindung unterbrochen – neuer Versuch $retries${if (maxR == Int.MAX_VALUE) "" else "/$maxR"} …")
                     handler.postDelayed(retryRunnable, 3000)
                 } else {
                     status("Nicht erreichbar.", 4000)
@@ -1556,6 +1873,7 @@ class MainActivity : Activity() {
     private fun loadStream(ch: Channel, force: Boolean) {
         val p = player ?: return
         if (!force && streamChannel?.url == ch.url && p.playbackState != Player.STATE_IDLE) return
+        if (streamChannel?.url != ch.url) bufBoost = 0
         streamChannel = ch
         retries = 0
         handler.removeCallbacks(retryRunnable)
@@ -1643,6 +1961,7 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- Fernbedienung
 
     override fun onBackPressed() {
+        if (skipIntro()) return
         when (screen) {
             Screen.PLAYER -> exitPlayer()
             Screen.BROWSE, Screen.SETTINGS -> showHome()
@@ -1651,6 +1970,7 @@ class MainActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (skipIntro()) return true
         if (screen != Screen.PLAYER) return super.onKeyDown(keyCode, event)
 
         val live = playKind == Kind.LIVE

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: http: https:; media-src * blob: data:; img-src * data: blob:; connect-src *; script-src 'self'">
+  <title>DJ64</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="bg"></div>
+  <canvas id="intro" class="hidden"></canvas>
+  <div id="app">
+    <section id="home" class="screen"></section>
+    <section id="browse" class="screen hidden"></section>
+    <section id="settings" class="screen hidden"></section>
+
+    <div id="player" class="hidden">
+      <video id="video" playsinline></video>
+      <div id="osd" class="hidden"></div>
+      <div id="controls" class="hidden">
+        <div id="ctl-title"></div>
+        <div id="ctl-sub"></div>
+        <div id="ctl-seek"><span id="ctl-pos">0:00</span><input id="ctl-range" type="range" min="0" max="1000" value="0"><span id="ctl-dur">0:00</span></div>
+        <div id="ctl-buttons"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+    <div id="modal-root"></div>
+  </div>
+
+  <script src="../node_modules/hls.js/dist/hls.min.js"></script>
+  <script src="../node_modules/mpegts.js/dist/mpegts.js"></script>
+  <script src="intro.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

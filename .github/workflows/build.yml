@@ -6,6 +6,8 @@ on:
     branches: [main, master]
     paths-ignore:
       - "release/**"
+      - "windows/**"
+      - ".github/workflows/windows.yml"
 
 permissions:
   contents: write

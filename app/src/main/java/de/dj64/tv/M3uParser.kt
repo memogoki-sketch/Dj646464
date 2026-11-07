@@ -16,19 +16,33 @@ data class Playlist(val channels: List<Channel>, val epgUrl: String)
 object M3uParser {
     private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
 
-    private val seriesWords = listOf("serie", "staffel", "season")
-    private val movieWords = listOf("film", "movie", "vod", "kino", "cinema")
+    private val seriesWords = listOf("serie", "staffel", "season", "dizi", "tv show", "tvshow")
+    private val movieWords = listOf("film", "movie", "vod", "kino", "cinema", "sinema")
+    private val epRegex = Regex("""(?i)\bS(\d{1,2})\s*[ ._-]?\s*E(\d{1,3})\b|\b(\d{1,2})x(\d{2,3})\b""")
 
-    fun classify(url: String, group: String): Kind {
+    data class Ep(val title: String, val season: Int, val episode: Int)
+
+    /** Erkennt "Serienname S01E02" bzw. "Serienname 1x02". */
+    fun episode(name: String): Ep? {
+        val m = epRegex.find(name) ?: return null
+        val s = (m.groupValues[1].ifEmpty { m.groupValues[3] }).toIntOrNull() ?: return null
+        val e = (m.groupValues[2].ifEmpty { m.groupValues[4] }).toIntOrNull() ?: return null
+        val title = name.substring(0, m.range.first).trim().trimEnd('-', '_', '.', ':', '[', '(', ' ').trim()
+        return Ep(title.ifBlank { name.trim() }, s, e)
+    }
+
+    fun classify(url: String, group: String, name: String = ""): Kind {
         val u = url.lowercase()
         val g = group.lowercase()
         val path = u.substringBefore('?')
         return when {
             "/series/" in u -> Kind.SERIES
             "/movie/" in u -> Kind.MOVIE
+            "/live/" in u -> Kind.LIVE
+            episode(name) != null -> Kind.SERIES
             seriesWords.any { it in g } -> Kind.SERIES
             movieWords.any { it in g } -> Kind.MOVIE
-            path.endsWith(".mp4") || path.endsWith(".mkv") || path.endsWith(".avi") -> Kind.MOVIE
+            listOf(".mp4", ".mkv", ".avi", ".mov", ".m4v").any { path.endsWith(it) } -> Kind.MOVIE
             else -> Kind.LIVE
         }
     }
@@ -63,7 +77,7 @@ object M3uParser {
                 pendingGroup = line.substringAfter(':').trim()
             } else if (!line.startsWith("#")) {
                 val name = pendingName?.takeIf { it.isNotBlank() } ?: line
-                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup), pendingId, pendingLogo))
+                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup, name), pendingId, pendingLogo))
                 pendingName = null
                 pendingGroup = ""
                 pendingId = ""

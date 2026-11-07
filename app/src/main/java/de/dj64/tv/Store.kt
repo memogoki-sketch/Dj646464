@@ -97,8 +97,40 @@ class Store(context: Context) {
         get() = p.getBoolean("epgAuto", true)
         set(value) = p.edit().putBoolean("epgAuto", value).apply()
     var introMode: Int // 0 voll, 1 kurz, 2 aus
-        get() = p.getInt("intro", 0)
+        get() = p.getInt("intro", 1)
         set(value) = p.edit().putInt("intro", value).apply()
+    // ---- Sortierung, Zuletzt gesehen, Jugendschutz
+    var sortAz: Boolean
+        get() = p.getBoolean("sortAz", true)
+        set(value) = p.edit().putBoolean("sortAz", value).apply()
+    var pcEnabled: Boolean
+        get() = p.getBoolean("pcOn", false)
+        set(value) = p.edit().putBoolean("pcOn", value).apply()
+    var pcHash: String
+        get() = str("pcHash")
+        set(value) = put("pcHash", value)
+    var pcAuto: Boolean
+        get() = p.getBoolean("pcAuto", true)
+        set(value) = p.edit().putBoolean("pcAuto", value).apply()
+    var pcHide: Boolean
+        get() = p.getBoolean("pcHide", false)
+        set(value) = p.edit().putBoolean("pcHide", value).apply()
+    var pcLockSettings: Boolean
+        get() = p.getBoolean("pcSet", false)
+        set(value) = p.edit().putBoolean("pcSet", value).apply()
+    var pcGroups: Set<String>
+        get() = HashSet(p.getStringSet("pcGroups", emptySet()) ?: emptySet())
+        set(value) = p.edit().putStringSet("pcGroups", HashSet(value)).apply()
+
+    fun recent(): List<String> = str("recent").split('\n').filter { it.isNotBlank() }
+
+    fun addRecent(url: String) {
+        val l = ArrayList(recent())
+        l.remove(url)
+        l.add(0, url)
+        put("recent", l.take(30).joinToString("\n"))
+    }
+
     var wxName: String
         get() = str("wxName")
         set(value) = put("wxName", value)

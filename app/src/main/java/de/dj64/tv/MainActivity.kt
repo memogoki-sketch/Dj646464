@@ -80,8 +80,8 @@ class MainActivity : Activity() {
     private val introNames = arrayOf("Voll (5,6 Sekunden)", "Kurz (3,5 Sekunden)", "Aus")
     private val bufMin = intArrayOf(5000, 15000, 30000, 50000)
     private val bufMax = intArrayOf(15000, 50000, 90000, 150000)
-    private val bufPlay = intArrayOf(1000, 1500, 2500, 4000)
-    private val bufRe = intArrayOf(2000, 3000, 5000, 8000)
+    private val bufPlay = intArrayOf(500, 1000, 2000, 3500)
+    private val bufRe = intArrayOf(1500, 2500, 4500, 7000)
     private val stallSec = intArrayOf(10, 15, 20, 30)
     private var bufBoost = 0
     private var introView: IntroView? = null
@@ -134,6 +134,16 @@ class MainActivity : Activity() {
     private var uiScale = 1f
 
     private var channels: List<Channel> = emptyList()
+        set(v) { field = v; kindCache = null }
+    private var kindCache: Map<Kind, List<Channel>>? = null
+    private val seriesFolders = HashMap<String, List<Channel>>()
+    private val seriesInfo = HashMap<String, String>()
+    private var openSeries: String? = null
+    private var openFolderPos = 0
+    private var pcUnlockUntil = 0L
+    private var settingsOkUntil = 0L
+    private var pcFails = 0
+    private var pcLockoutUntil = 0L
     private var headerEpgUrl = ""
     private var epg: Epg? = null
 
@@ -177,15 +187,22 @@ class MainActivity : Activity() {
         applyBackground()
         applyMargin()
 
-        if (cacheFile.exists()) {
-            runCatching {
-                val pl = M3uParser.parse(cacheFile.readText())
-                channels = pl.channels
-                headerEpgUrl = pl.epgUrl
-            }
-        }
         showHome()
-        if (store.epgAuto) loadEpg()
+        if (cacheFile.exists()) {
+            Thread {
+                runCatching {
+                    val pl = M3uParser.parse(cacheFile.readText())
+                    handler.post {
+                        if (channels.isEmpty()) {
+                            channels = pl.channels
+                            headerEpgUrl = pl.epgUrl
+                            if (screen == Screen.HOME) showHome()
+                            if (store.epgAuto) loadEpg()
+                        }
+                    }
+                }
+            }.start()
+        }
         loadWeather(false)
 
         val url = store.playlistUrl()
@@ -208,6 +225,8 @@ class MainActivity : Activity() {
         handler.removeCallbacks(previewRunnable)
         handler.removeCallbacks(boostRunnable)
         handler.removeCallbacks(stallRunnable)
+        pcUnlockUntil = 0L
+        settingsOkUntil = 0L
         player?.release()
         player = null
     }
@@ -438,7 +457,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun count(kind: Kind): Int = channels.count { it.kind == kind }
+    private fun kindList(kind: Kind): List<Channel> {
+        val m = kindCache ?: channels.groupBy { it.kind }.also { kindCache = it }
+        return m[kind] ?: emptyList()
+    }
+
+    private fun count(kind: Kind): Int = kindList(kind).size
 
     private fun refreshAll() {
         val url = store.playlistUrl()
@@ -473,7 +497,7 @@ class MainActivity : Activity() {
         top.addView(timeBox, lp(0, -2, 1f))
         top.addView(iconButton(R.drawable.ic_search) { showSearchDialog(Kind.LIVE) })
         top.addView(iconButton(R.drawable.ic_heart) { showBrowse(Kind.LIVE, 1) })
-        top.addView(iconButton(R.drawable.ic_user) { showAccountDialog() })
+        top.addView(iconButton(R.drawable.ic_user) { gate { showAccountDialog() } })
         top.addView(iconButton(R.drawable.ic_refresh) { refreshAll() })
         page.addView(top, lp(-1, -2))
 
@@ -531,7 +555,8 @@ class MainActivity : Activity() {
 
     private fun visibleOfKind(kind: Kind): List<Channel> {
         val hidden = store.hiddenGroups
-        return channels.filter { it.kind == kind && groupOf(it) !in hidden }
+        val l = kindList(kind)
+        return if (hidden.isEmpty()) l else l.filter { groupOf(it) !in hidden }
     }
 
     private class Row {
@@ -566,6 +591,12 @@ class MainActivity : Activity() {
             row.num.text = (position + 1).toString()
             row.name.text = (if (c.url in favs) "★ " else "") + c.name
             var sub = c.group
+            val info = seriesInfo[c.url]
+            if (info != null) {
+                sub = info
+            } else if (c.kind == Kind.SERIES) {
+                M3uParser.episode(c.name)?.let { sub = "Staffel ${it.season} · Folge ${it.episode}" }
+            }
             val e = epgNow
             if (e != null && c.kind == Kind.LIVE) {
                 val cur = e.nowNext(c, now).first
@@ -623,6 +654,7 @@ class MainActivity : Activity() {
         browseKind = kind
         browseCat = startCat
         browseQuery = query
+        if (selectPos < 0) openSeries = null
         handler.removeCallbacks(previewRunnable)
         val live = kind == Kind.LIVE
         if (!live) hidePlayer()
@@ -640,15 +672,20 @@ class MainActivity : Activity() {
         val base = visibleOfKind(kind)
         val items = if (query.isBlank()) base else base.filter { it.name.contains(query, ignoreCase = true) }
         val favs = store.favoriteSet()
-        val groups = items.map { groupOf(it) }.distinct()
+        val unlockedNow = !pcActive() || pcUnlocked()
+        var groups = orderGroups(items.map { groupOf(it) }.distinct())
+        if (store.pcHide && !unlockedNow) groups = groups.filter { !groupLocked(it) }
         val groupCounts = items.groupingBy { groupOf(it) }.eachCount()
+        val visItems = items.filter { !hiddenByPc(it) }
+        val recentUrls = store.recent().toSet()
 
         val catLabels = ArrayList<String>()
         if (query.isBlank()) {
-            catGroups = listOf("", "") + groups
-            catLabels.add("Alle (${items.size})")
-            catLabels.add("★ Favoriten (${items.count { it.url in favs }})")
-            groups.forEach { catLabels.add("$it (${groupCounts[it] ?: 0})") }
+            catGroups = listOf("", "", "") + groups
+            catLabels.add("Alle (${visItems.size})")
+            catLabels.add("★ Favoriten (${visItems.count { it.url in favs }})")
+            catLabels.add("🕘 Zuletzt gesehen (${visItems.count { it.url in recentUrls }})")
+            groups.forEach { catLabels.add("${if (groupLocked(it) && !unlockedNow) "🔒 " else ""}$it (${groupCounts[it] ?: 0})") }
         } else {
             catGroups = listOf("")
             catLabels.add("Suchergebnisse (${items.size})")
@@ -705,12 +742,16 @@ class MainActivity : Activity() {
 
         catList.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                if (pos != browseCat || currentItems.isEmpty()) fillChannels(pos)
+                if (pos != browseCat || currentItems.isEmpty()) {
+                    openSeries = null
+                    fillChannels(pos)
+                }
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
         catList.setOnItemClickListener { _, _, pos, _ ->
+            openSeries = null
             fillChannels(pos)
             cList.requestFocus()
         }
@@ -719,7 +760,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
                 val ch = currentItems.getOrNull(pos)
                 updateInfoPane(ch)
-                if (live && ch != null && cList.hasFocus()) schedulePreview(ch)
+                if (live && ch != null && cList.hasFocus() && isReal(ch)) schedulePreview(ch)
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -729,11 +770,27 @@ class MainActivity : Activity() {
                 val ch = currentItems.getOrNull(cList.selectedItemPosition)
                 if (ch != null) {
                     updateInfoPane(ch)
-                    if (live) schedulePreview(ch)
+                    if (live && isReal(ch)) schedulePreview(ch)
                 }
             }
         }
-        cList.setOnItemClickListener { _, _, pos, _ -> play(currentItems, pos) }
+        cList.setOnItemClickListener { _, _, pos, _ ->
+            val ch = currentItems.getOrNull(pos)
+            when {
+                ch == null -> {}
+                ch.url.startsWith("lock://") -> askPin("PIN für gesperrte Kategorie", unlock = true) {
+                    fillChannels(browseCat)
+                    showBrowse(browseKind, browseCat, -1, browseQuery)
+                }
+                ch.url.startsWith("series://") -> {
+                    openFolderPos = pos
+                    openSeries = ch.url
+                    fillChannels(browseCat)
+                    cList.setSelection(0)
+                }
+                else -> play(currentItems, pos)
+            }
+        }
         cList.setOnItemLongClickListener { _, _, pos, _ ->
             toggleFavorite(pos)
             true
@@ -810,19 +867,42 @@ class MainActivity : Activity() {
 
     private fun fillChannels(cat: Int) {
         browseCat = cat
-        val base = visibleOfKind(browseKind)
+        val kind = browseKind
+        val base = visibleOfKind(kind)
         val items = if (browseQuery.isBlank()) base else base.filter { it.name.contains(browseQuery, ignoreCase = true) }
         val favs = store.favoriteSet()
-        currentItems = if (browseQuery.isNotBlank()) {
-            items
-        } else when (cat) {
-            0 -> items
-            1 -> items.filter { it.url in favs }
-            else -> {
-                val g = catGroups.getOrNull(cat)
-                items.filter { groupOf(it) == g }
+        val open = openSeries
+        var list: List<Channel>
+        var folders = false
+        var sortIt = false
+        if (open != null && seriesFolders.containsKey(open)) {
+            list = seriesFolders[open] ?: emptyList()
+        } else {
+            openSeries = null
+            val vis = items.filter { !hiddenByPc(it) }
+            if (browseQuery.isNotBlank()) {
+                list = vis; folders = kind == Kind.SERIES; sortIt = true
+            } else when (cat) {
+                0 -> { list = vis; folders = kind == Kind.SERIES; sortIt = true }
+                1 -> list = vis.filter { it.url in favs }
+                2 -> {
+                    val byUrl = vis.associateBy { it.url }
+                    list = store.recent().mapNotNull { byUrl[it] }
+                }
+                else -> {
+                    val g = catGroups.getOrNull(cat) ?: ""
+                    val inGroup = items.filter { groupOf(it) == g }
+                    if (inGroup.isNotEmpty() && inGroup.all { hiddenByPc(it) } && groupLocked(g)) {
+                        list = listOf(Channel("🔒 Gesperrt – OK drücken und PIN eingeben", "lock://$g", g, kind))
+                    } else {
+                        list = inGroup.filter { !hiddenByPc(it) }; folders = kind == Kind.SERIES; sortIt = true
+                    }
+                }
             }
+            if (sortIt && kind != Kind.LIVE && store.sortAz) list = list.sortedWith { a, b -> naturalCmp.compare(a.name, b.name) }
+            if (folders) list = buildFolders(list)
         }
+        currentItems = list
         val adapter = chanAdapter ?: return
         adapter.items = currentItems
         adapter.favs = favs
@@ -834,6 +914,10 @@ class MainActivity : Activity() {
 
     private fun toggleFavorite(pos: Int) {
         val ch = currentItems.getOrNull(pos) ?: return
+        if (!isReal(ch)) {
+            status("Favorit nur für einzelne Folgen und Sender", 2000)
+            return
+        }
         val now = store.toggleFavorite(ch.url)
         status(if (now) "★ Favorit gespeichert" else "Favorit entfernt", 1500)
         val list = chanList
@@ -928,13 +1012,15 @@ class MainActivity : Activity() {
     private fun schedulePreview(ch: Channel) {
         pendingPreview = ch
         handler.removeCallbacks(previewRunnable)
-        if (!store.preview) return
+        if (!store.preview || !isReal(ch)) return
         handler.postDelayed(previewRunnable, (previewDelays[store.previewDelayIdx.coerceIn(0, 3)] * 1000).toLong())
     }
 
     // ---------------------------------------------------------------- Einstellungen
 
-    private fun showSettings() {
+    private fun showSettings() = gate { showSettingsInner() }
+
+    private fun showSettingsInner() {
         screen = Screen.SETTINGS
         handler.removeCallbacks(previewRunnable)
         hidePlayer()
@@ -983,12 +1069,14 @@ class MainActivity : Activity() {
                 st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
                 st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.4") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.5") { showInfo() }
             )
         )
         grid.addView(
             row(
-                st(R.drawable.ic_settings, "Weitere Einstellungen", "Android-System") { openSystemSettings() }
+                st(R.drawable.ic_settings, "Weitere Einstellungen", "Android-System") { openSystemSettings() },
+                st(R.drawable.ic_lock, "Jugendschutz", if (pcActive()) "PIN aktiv" else "Aus") { pcMenuEntry() },
+                st(R.drawable.ic_folder, "Sortierung", if (store.sortAz) "A–Z" else "Original") { sortMenu() }
             )
         )
 
@@ -1714,6 +1802,239 @@ class MainActivity : Activity() {
 
     private fun effectiveBuf(): Int = (store.bufLevel + bufBoost).coerceIn(0, 3)
 
+
+    // ---------------------------------------------------------------- Sortierung und Serienordner
+
+    private val naturalCmp = Comparator<String> { a, b ->
+        var i = 0
+        var j = 0
+        var res = 0
+        while (res == 0 && i < a.length && j < b.length) {
+            val ca = a[i]
+            val cb = b[j]
+            if (ca.isDigit() && cb.isDigit()) {
+                var ie = i
+                while (ie < a.length && a[ie].isDigit()) ie++
+                var je = j
+                while (je < b.length && b[je].isDigit()) je++
+                val na = a.substring(i, ie).trimStart('0')
+                val nb = b.substring(j, je).trimStart('0')
+                res = if (na.length != nb.length) na.length - nb.length else na.compareTo(nb)
+                i = ie
+                j = je
+            } else {
+                res = ca.lowercaseChar().compareTo(cb.lowercaseChar())
+                i++
+                j++
+            }
+        }
+        if (res != 0) res else (a.length - i) - (b.length - j)
+    }
+
+    private fun orderGroups(groups: List<String>): List<String> =
+        if (!store.sortAz) groups
+        else groups.sortedWith(compareBy<String> { groupLocked(it) }.thenComparator { a, b -> naturalCmp.compare(a, b) })
+
+    private fun buildFolders(list: List<Channel>): List<Channel> {
+        seriesFolders.clear()
+        seriesInfo.clear()
+        val order = LinkedHashMap<String, Any>()
+        val eps = HashMap<String, MutableList<Channel>>()
+        val titles = HashMap<String, String>()
+        for (c in list) {
+            val e = M3uParser.episode(c.name)
+            if (e == null) {
+                order["#" + c.url] = c
+            } else {
+                val key = e.title.lowercase()
+                if (key !in eps) {
+                    eps[key] = ArrayList()
+                    titles[key] = e.title
+                    order[key] = key
+                }
+                eps[key]!!.add(c)
+            }
+        }
+        val out = ArrayList<Channel>()
+        for ((k, v) in order) {
+            if (v is Channel) { out.add(v); continue }
+            val episodes = eps[k]!!
+            val first = episodes[0]
+            val url = "series://$k"
+            seriesFolders[url] = sortEpisodes(episodes)
+            val seasons = episodes.mapNotNull { M3uParser.episode(it.name)?.season }.distinct().size
+            seriesInfo[url] = "${episodes.size} Folgen · $seasons Staffel${if (seasons == 1) "" else "n"}"
+            out.add(Channel(titles[k] ?: k, url, first.group, Kind.SERIES, "", episodes.firstOrNull { it.logo.isNotBlank() }?.logo ?: ""))
+        }
+        return out
+    }
+
+    private fun sortEpisodes(l: List<Channel>): List<Channel> = l.sortedWith(Comparator { a, b ->
+        val ea = M3uParser.episode(a.name)
+        val eb = M3uParser.episode(b.name)
+        val c1 = (ea?.season ?: 0) - (eb?.season ?: 0)
+        if (c1 != 0) c1 else {
+            val c2 = (ea?.episode ?: 0) - (eb?.episode ?: 0)
+            if (c2 != 0) c2 else naturalCmp.compare(a.name, b.name)
+        }
+    })
+
+    private fun isReal(c: Channel) = !c.url.startsWith("series://") && !c.url.startsWith("lock://")
+
+    // ---------------------------------------------------------------- Jugendschutz
+
+    private val adultRe = Regex("""(?i)(\bxxx\b|adult|\b18\s?\+|\+\s?18|erotik|porn|\bsex|erwachsene|nsfw|ab 18|fsk ?18|playboy|hustler|dorcel|brazzers|yetişkin)""")
+
+    private fun pcActive() = store.pcEnabled && store.pcHash.isNotBlank()
+    private fun pcUnlocked() = System.currentTimeMillis() < pcUnlockUntil
+    private fun groupLocked(g: String) = pcActive() && (g in store.pcGroups || (store.pcAuto && adultRe.containsMatchIn(g)))
+    private fun chLocked(c: Channel) = groupLocked(groupOf(c)) || (pcActive() && store.pcAuto && adultRe.containsMatchIn(c.name))
+    private fun hiddenByPc(c: Channel) = chLocked(c) && !pcUnlocked()
+
+    private fun hashPin(pin: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest("dj64:$pin".toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private fun askPin(title: String = "PIN eingeben", unlock: Boolean = false, ok: () -> Unit) {
+        if (!pcActive()) { ok(); return }
+        val now = System.currentTimeMillis()
+        if (now < pcLockoutUntil) {
+            status("Zu viele Versuche. Bitte ${(pcLockoutUntil - now) / 1000 + 1} s warten.", 3000)
+            return
+        }
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            hint = "PIN"
+            setSingleLine()
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("OK") { _, _ ->
+                if (hashPin(input.text.toString()) == store.pcHash) {
+                    pcFails = 0
+                    if (unlock) pcUnlockUntil = System.currentTimeMillis() + 30 * 60_000L
+                    ok()
+                } else {
+                    pcFails++
+                    if (pcFails >= 5) {
+                        pcFails = 0
+                        pcLockoutUntil = System.currentTimeMillis() + 60_000L
+                        status("Zu viele falsche PINs – 60 Sekunden gesperrt", 4000)
+                    } else {
+                        status("Falsche PIN", 2500)
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun setPin(done: () -> Unit) {
+        fun field(h: String) = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            hint = h
+            setSingleLine()
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+        }
+        val a = field("Neue PIN (4–6 Ziffern)")
+        val b = field("PIN wiederholen")
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            addView(a)
+            addView(b)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("PIN festlegen")
+            .setView(box)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("Speichern") { _, _ ->
+                val p1 = a.text.toString()
+                if (p1.length in 4..6 && p1 == b.text.toString()) {
+                    store.pcHash = hashPin(p1)
+                    store.pcEnabled = true
+                    pcUnlockUntil = 0L
+                    status("PIN gespeichert", 2500)
+                    done()
+                } else {
+                    status("PIN: 4–6 Ziffern, beide Eingaben gleich", 4000)
+                }
+            }
+            .show()
+    }
+
+    private fun gate(action: () -> Unit) {
+        if (!pcActive() || !store.pcLockSettings || System.currentTimeMillis() < settingsOkUntil) { action(); return }
+        askPin("PIN für Einstellungen") {
+            settingsOkUntil = System.currentTimeMillis() + 5 * 60_000L
+            action()
+        }
+    }
+
+    private fun pcMenuEntry() = askPin("Jugendschutz – PIN eingeben") { pcMenu() }
+
+    private fun pcMenu() {
+        val active = pcActive()
+        val labels = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        labels.add("Jugendschutz: ${onOff(active)}")
+        acts.add {
+            if (active) {
+                store.pcEnabled = false
+                store.pcHash = ""
+                pcUnlockUntil = 0L
+                status("Jugendschutz ausgeschaltet", 2500)
+                pcMenu()
+            } else setPin { pcMenu() }
+        }
+        if (active) {
+            labels.add("PIN ändern"); acts.add { setPin { pcMenu() } }
+            labels.add("Erwachsenen-Kategorien automatisch sperren: ${onOff(store.pcAuto)}"); acts.add { store.pcAuto = !store.pcAuto; pcMenu() }
+            labels.add("Kategorien manuell sperren (${store.pcGroups.size})"); acts.add { pickLockedGroups() }
+            labels.add("Gesperrte Kategorien ausblenden: ${onOff(store.pcHide)}"); acts.add { store.pcHide = !store.pcHide; pcMenu() }
+            labels.add("Einstellungen mit PIN schützen: ${onOff(store.pcLockSettings)}"); acts.add { store.pcLockSettings = !store.pcLockSettings; pcMenu() }
+            labels.add("Jetzt sperren"); acts.add { pcUnlockUntil = 0L; settingsOkUntil = 0L; status("Gesperrt", 2000) }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Jugendschutz")
+            .setItems(labels.toTypedArray()) { _, which -> acts[which]() }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun pickLockedGroups() {
+        if (channels.isEmpty()) { status("Zuerst die Playlist laden", 2500); pcMenu(); return }
+        val all = channels.map { groupOf(it) }.distinct().sortedWith(naturalCmp)
+        val locked = store.pcGroups
+        val checked = BooleanArray(all.size) { all[it] in locked }
+        AlertDialog.Builder(this)
+            .setTitle("Kategorien sperren")
+            .setMultiChoiceItems(all.toTypedArray(), checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("Speichern") { _, _ ->
+                val s = HashSet<String>()
+                all.forEachIndexed { i, g -> if (checked[i]) s.add(g) }
+                store.pcGroups = s
+                status("Gespeichert", 2000)
+                pcMenu()
+            }
+            .setNegativeButton("Abbrechen") { _, _ -> pcMenu() }
+            .show()
+    }
+
+    private fun sortMenu() {
+        AlertDialog.Builder(this)
+            .setTitle("Sortierung (Kategorien, Filme, Serien)")
+            .setSingleChoiceItems(arrayOf("A–Z (empfohlen)", "Original der Playlist"), if (store.sortAz) 0 else 1) { d, which ->
+                store.sortAz = which == 0
+                d.dismiss()
+                status("Sortierung gespeichert", 2000)
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
     private fun showInfo() {
         val source = if (store.usesXtream()) {
             "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
@@ -1721,7 +2042,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.4")
+            .setTitle("DJ64 1.5")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -1767,7 +2088,7 @@ class MainActivity : Activity() {
     private fun rerender() {
         when (screen) {
             Screen.HOME -> showHome()
-            Screen.BROWSE -> showBrowse(browseKind, 0, -1, browseQuery)
+            Screen.BROWSE -> showBrowse(browseKind, browseCat, -1, browseQuery)
             Screen.SETTINGS -> showSettings()
             Screen.PLAYER -> {}
         }
@@ -1902,6 +2223,7 @@ class MainActivity : Activity() {
         playIndex = index
         playKind = ch.kind
         store.lastUrl = ch.url
+        store.addRecent(ch.url)
         screen = Screen.PLAYER
         content.visibility = View.GONE
         playerView.layoutParams = FrameLayout.LayoutParams(-1, -1)
@@ -1962,6 +2284,12 @@ class MainActivity : Activity() {
 
     override fun onBackPressed() {
         if (skipIntro()) return
+        if (screen == Screen.BROWSE && openSeries != null) {
+            openSeries = null
+            fillChannels(browseCat)
+            chanList?.setSelection(openFolderPos)
+            return
+        }
         when (screen) {
             Screen.PLAYER -> exitPlayer()
             Screen.BROWSE, Screen.SETTINGS -> showHome()

@@ -66,6 +66,7 @@ const ICONS = {
   replay: 'M12,5V1L7,6l5,5V7c3.31,0 6,2.69 6,6s-2.69,6 -6,6 -6,-2.69 -6,-6H4c0,4.42 3.58,8 8,8s8,-3.58 8,-8 -3.58,-8 -8,-8z',
   aspect: 'M19,12h-2v3h-3v2h5v-5zM7,9h3V7H5v5h2V9zM21,3H3c-1.1,0 -2,0.9 -2,2v14c0,1.1 0.9,2 2,2h18c1.1,0 2,-0.9 2,-2V5c0,-1.1 -0.9,-2 -2,-2zM21,19.01H3V4.99h18v14.02z',
   next: 'M6,18l8.5,-6L6,6v12zM16,6v12h2V6h-2z',
+  lock: 'M18,8h-1V6c0,-2.76 -2.24,-5 -5,-5S7,3.24 7,6v2H6c-1.1,0 -2,0.9 -2,2v10c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V10c0,-1.1 -0.9,-2 -2,-2zM12,17c-1.1,0 -2,-0.9 -2,-2s0.9,-2 2,-2 2,0.9 2,2 -0.9,2 -2,2zM15.1,8H8.9V6c0,-1.71 1.39,-3.1 3.1,-3.1 1.71,0 3.1,1.39 3.1,3.1v2z',
   sun: 'M6.76,4.84l-1.8,-1.79 -1.41,1.41 1.79,1.79 1.42,-1.41zM4,10.5H1v2h3v-2zM13,0.55h-2V3.5h2V0.55zM20.45,4.46l-1.41,-1.41 -1.79,1.79 1.41,1.41 1.79,-1.79zM17.24,18.16l1.79,1.8 1.41,-1.41 -1.8,-1.79 -1.4,1.4zM20,10.5v2h3v-2h-3zM12,5.5c-3.31,0 -6,2.69 -6,6s2.69,6 6,6 6,-2.69 6,-6 -2.69,-6 -6,-6zM11,22.45h2V19.5h-2v2.95zM3.55,18.54l1.41,1.41 1.79,-1.8 -1.41,-1.41 -1.79,1.8z'
 };
 const ic = (n, style = '') =>
@@ -111,7 +112,14 @@ const state = {
   sel: 0,
   zone: 'cats',
   play: null,
-  winFull: false
+  winFull: false,
+  index: null,
+  byUrl: null,
+  sorted: {},
+  folder: null,
+  catLocked: false,
+  unlockUntil: 0,
+  wasUnlocked: false
 };
 
 /* ---------------- Zugangsdaten ---------------- */
@@ -140,19 +148,30 @@ function epgUrl() {
 
 /* ---------------- M3U ---------------- */
 
-const SERIES_WORDS = ['serie', 'staffel', 'season'];
-const MOVIE_WORDS = ['film', 'movie', 'vod', 'kino', 'cinema'];
+const SERIES_WORDS = ['serie', 'staffel', 'season', 'dizi', 'tv show'];
+const MOVIE_WORDS = ['film', 'movie', 'vod', 'kino', 'cinema', 'sinema'];
+const EP_TEST = /\bS\d{1,2}[ ._-]?E\d{1,3}\b|\b\d{1,2}x\d{2,3}\b/i;
+const EP_RE = /^(.*?)[\s._\-–:|]*[\[(]?\b(?:S(\d{1,2})[ ._-]?E(\d{1,3})|(\d{1,2})x(\d{2,3}))\b/i;
 
-function classify(url, group) {
+function classify(url, group, name) {
   const u = url.toLowerCase();
   const g = group.toLowerCase();
   const path = u.split('?')[0];
   if (u.includes('/series/')) return 'series';
   if (u.includes('/movie/')) return 'movie';
+  if (u.includes('/live/')) return 'live';
+  if (name && EP_TEST.test(name)) return 'series';
   if (SERIES_WORDS.some((w) => g.includes(w))) return 'series';
   if (MOVIE_WORDS.some((w) => g.includes(w))) return 'movie';
-  if (/\.(mp4|mkv|avi)$/.test(path)) return 'movie';
+  if (/\.(mp4|mkv|avi|mov|m4v)$/.test(path)) return 'movie';
   return 'live';
+}
+
+/** Zerlegt "Titel S01E02 – Name" in Serientitel, Staffel, Folge. */
+function parseEpisode(name) {
+  const m = EP_RE.exec(name);
+  if (!m || !m[1].trim()) return null;
+  return { sTitle: m[1].trim(), season: +(m[2] || m[4]), ep: +(m[3] || m[5]) };
 }
 
 function attr(line, name) {
@@ -187,7 +206,14 @@ function parseM3u(text) {
     } else if (up.startsWith('#EXTGRP')) {
       group = line.slice(line.indexOf(':') + 1).trim();
     } else if (!line.startsWith('#')) {
-      channels.push({ name: name || line, url: line, group, kind: classify(line, group), tvgId, logo });
+      const nm = name || line;
+      const kind = classify(line, group, nm);
+      const ch = { name: nm, url: line, group, kind, tvgId, logo };
+      if (kind === 'series') {
+        const e = parseEpisode(nm);
+        if (e) Object.assign(ch, e);
+      }
+      channels.push(ch);
       name = null;
       group = '';
       tvgId = '';
@@ -201,15 +227,291 @@ function setPlaylist(pl) {
   state.channels = pl.channels;
   state.headerEpg = pl.epg;
   const c = { live: 0, movie: 0, series: 0 };
-  for (const ch of pl.channels) c[ch.kind]++;
+  const idx = { live: [], movie: [], series: [] };
+  const byUrl = new Map();
+  for (const ch of pl.channels) {
+    c[ch.kind]++;
+    idx[ch.kind].push(ch);
+    byUrl.set(ch.url, ch);
+  }
   state.counts = c;
+  state.index = idx;   // einmal nach Art sortiert, spart Filtern bei jedem Aufbau
+  state.byUrl = byUrl;
+  state.sorted = {};
+  lockCache.clear();
 }
 
 const groupOf = (c) => c.group || 'Ohne Kategorie';
-const favSet = () => new Set(S.get('fav', []));
+let favCache = null;
+const favSet = () => favCache || (favCache = new Set(S.get('fav', [])));
+const collator = new Intl.Collator('de', { numeric: true, sensitivity: 'base' });
+const sortMode = () => S.get('sort', 1); // 0 = Original, 1 = A–Z
+
+function sortedKind(kind) {
+  const key = kind + sortMode();
+  if (!state.sorted[key]) {
+    const list = (state.index && state.index[kind]) || [];
+    state.sorted[key] = kind !== 'live' && sortMode() === 1 ? list.slice().sort((a, b) => collator.compare(a.name, b.name)) : list;
+  }
+  return state.sorted[key];
+}
+
 function visibleOfKind(kind) {
+  const hidden = S.get('hidden', []);
+  const list = sortedKind(kind);
+  if (!hidden.length) return list;
+  const h = new Set(hidden);
+  return list.filter((c) => !h.has(groupOf(c)));
+}
+
+/* ---------------- Jugendschutz ---------------- */
+
+const ADULT_RE = /\bxxx\b|adult|\b18\s?\+|\+\s?18|erotik|porn|\bsex|erwachsene|nsfw|ab 18|fsk ?18|playboy|hustler|dorcel|brazzers|yetişkin/i;
+const lockCache = new Map();
+const parentalOn = () => !!S.get('pc.on', false) && !!S.get('pc.hash', '');
+const pcAuto = () => S.get('pc.auto', true);
+const unlocked = () => Date.now() < (state.unlockUntil || 0);
+
+function lockedGroup(g) {
+  if (!parentalOn()) return false;
+  let v = lockCache.get(g);
+  if (v === undefined) {
+    v = S.get('pc.manual', []).includes(g) || (pcAuto() && ADULT_RE.test(g));
+    lockCache.set(g, v);
+  }
+  return v;
+}
+const isBlocked = (c) => parentalOn() && !unlocked() && (lockedGroup(groupOf(c)) || (pcAuto() && ADULT_RE.test(c.name)));
+const pcChanged = () => lockCache.clear();
+
+function sha256(str) {
+  const bytes = new TextEncoder().encode(str);
+  const K = [];
+  for (let n = 2, c = 0; c < 64; n++) {
+    let p = true;
+    for (let d = 2; d * d <= n; d++) if (n % d === 0) { p = false; break; }
+    if (p) { K[c++] = (Math.pow(n, 1 / 3) * 4294967296) | 0; }
+  }
+  const H = [];
+  for (let n = 2, c = 0; c < 8; n++) {
+    let p = true;
+    for (let d = 2; d * d <= n; d++) if (n % d === 0) { p = false; break; }
+    if (p) { H[c++] = (Math.pow(n, 1 / 2) * 4294967296) | 0; }
+  }
+  const l = bytes.length;
+  const total = (((l + 9 + 63) >> 6) << 6);
+  const buf = new Uint8Array(total);
+  buf.set(bytes);
+  buf[l] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(total - 4, l * 8, false);
+  const w = new Array(64);
+  const rr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let o = 0; o < total; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rr(w[i - 15], 7) ^ rr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rr(w[i - 2], 17) ^ rr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rr(e, 6) ^ rr(e, 11) ^ rr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+      const S0 = rr(a, 2) ^ rr(a, 13) ^ rr(a, 22);
+      const mj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + mj) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+  return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+const pinHash = (pin) => sha256('dj64' + pin);
+
+function unlockNow() {
+  state.unlockUntil = Date.now() + 30 * 60e3;
+  state.wasUnlocked = true;
+}
+
+function pinWaitSec() {
+  return Math.max(0, Math.ceil((S.get('pc.lockUntil', 0) - Date.now()) / 1000));
+}
+
+/** Fragt die PIN ab und ruft bei Erfolg onOk auf (nach dem Schließen des Dialogs). */
+function askPin(title, onOk) {
+  if (!parentalOn()) { onOk(); return; }
+  const body = el('div');
+  body.innerHTML = '<label>PIN</label><input type="password" id="pin" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="PIN eingeben"><div class="small" id="pinmsg" style="margin-top:.6rem;min-height:1.3rem"></div>';
+  const inp = $('#pin', body);
+  inp.addEventListener('input', () => { inp.value = inp.value.replace(/\D/g, ''); });
+  openModal({
+    title,
+    body,
+    buttons: [
+      { label: 'Abbrechen' },
+      {
+        label: 'OK',
+        primary: true,
+        onClick: (m) => {
+          const msg = $('#pinmsg', m);
+          const wait = pinWaitSec();
+          if (wait > 0) { msg.textContent = `Zu viele Versuche. Bitte ${wait} Sekunden warten.`; return false; }
+          if (pinHash(inp.value) === S.get('pc.hash', '')) {
+            S.set('pc.fail', 0);
+            setTimeout(onOk, 0);
+            return undefined;
+          }
+          const fails = S.get('pc.fail', 0) + 1;
+          if (fails >= 5) {
+            S.set('pc.fail', 0);
+            S.set('pc.lockUntil', Date.now() + 60e3);
+            msg.textContent = 'Falsche PIN. Eingabe 60 Sekunden gesperrt.';
+          } else {
+            S.set('pc.fail', fails);
+            msg.textContent = `Falsche PIN (${fails}/5).`;
+          }
+          inp.value = '';
+          inp.focus();
+          return false;
+        }
+      }
+    ]
+  });
+}
+const askUnlock = (cb) => askPin('PIN eingeben', () => { unlockNow(); if (cb) cb(); });
+/** Schützt den Zugriff (z. B. Einstellungen), wenn gewünscht. */
+function gate(cb) {
+  if (parentalOn() && S.get('pc.setlock', false) && !unlocked()) askUnlock(cb);
+  else cb();
+}
+
+function setPinDialog(onOk) {
+  const body = el('div');
+  body.innerHTML = '<label>Neue PIN (4 bis 6 Ziffern)</label><input type="password" id="pin1" inputmode="numeric" maxlength="6" autocomplete="off"><label>PIN wiederholen</label><input type="password" id="pin2" inputmode="numeric" maxlength="6" autocomplete="off"><div class="small" id="pinmsg" style="margin-top:.6rem;min-height:1.3rem"></div>';
+  body.querySelectorAll('input').forEach((i) => i.addEventListener('input', () => { i.value = i.value.replace(/\D/g, ''); }));
+  openModal({
+    title: 'PIN festlegen',
+    body,
+    buttons: [
+      { label: 'Abbrechen' },
+      {
+        label: 'Speichern',
+        primary: true,
+        onClick: (m) => {
+          const a = $('#pin1', m).value;
+          const b = $('#pin2', m).value;
+          const msg = $('#pinmsg', m);
+          if (!/^\d{4,6}$/.test(a)) { msg.textContent = 'Die PIN braucht 4 bis 6 Ziffern.'; return false; }
+          if (a !== b) { msg.textContent = 'Die beiden Eingaben sind verschieden.'; return false; }
+          S.set('pc.hash', pinHash(a));
+          S.set('pc.on', true);
+          S.set('pc.fail', 0);
+          pcChanged();
+          setTimeout(() => { if (onOk) onOk(); }, 0);
+          return undefined;
+        }
+      }
+    ]
+  });
+}
+
+function showParental() {
+  askPin('Jugendschutz', () => parentalMenu());
+}
+
+function parentalMenu() {
+  const on = parentalOn();
+  const rows = () => {
+    const r = [{
+      label: 'Jugendschutz', value: onOff(parentalOn()),
+      pick: (back) => {
+        if (!parentalOn()) setPinDialog(() => parentalMenu());
+        else askPin('Jugendschutz ausschalten', () => { S.set('pc.on', false); S.del('pc.hash'); pcChanged(); state.unlockUntil = 0; toast('Jugendschutz aus', 2000); parentalMenu(); });
+        void back;
+      }
+    }];
+    if (parentalOn()) {
+      r.push(
+        { label: 'PIN ändern', value: '', pick: () => setPinDialog(() => toast('PIN geändert', 2000)) },
+        { label: 'Erwachsenen-Kategorien automatisch sperren', value: onOff(pcAuto()), pick: (back) => { S.set('pc.auto', !pcAuto()); pcChanged(); back(); } },
+        {
+          label: 'Kategorien manuell sperren', value: S.get('pc.manual', []).length + ' gesperrt',
+          pick: (back) => {
+            const all = [...new Set(state.channels.map(groupOf))].sort((a, b) => collator.compare(a, b));
+            if (!all.length) { toast('Zuerst die Playlist laden', 2500); back(); return; }
+            const man = new Set(S.get('pc.manual', []));
+            multiDialog('Gesperrte Kategorien', all, all.map((g) => man.has(g)), (checked) => {
+              S.set('pc.manual', all.filter((_, i) => checked[i]));
+              pcChanged();
+              toast('Gespeichert', 2000);
+              parentalMenu();
+            }, { allLabel: 'Keine sperren', allValue: false });
+          }
+        },
+        { label: 'Gesperrte Kategorien ausblenden', value: onOff(S.get('pc.hide', false)), pick: (back) => { S.set('pc.hide', !S.get('pc.hide', false)); back(); } },
+        { label: 'Einstellungen mit PIN schützen', value: onOff(S.get('pc.setlock', false)), pick: (back) => { S.set('pc.setlock', !S.get('pc.setlock', false)); back(); } },
+        unlocked()
+          ? { label: 'Jetzt sperren', value: '', pick: () => { state.unlockUntil = 0; toast('Gesperrt', 2000); afterLockChange(); } }
+          : { label: 'Jetzt entsperren (30 Minuten)', value: '', pick: () => { unlockNow(); toast('Entsperrt für 30 Minuten', 2500); } }
+      );
+    }
+    return r;
+  };
+  void on;
+  menuDialog('Jugendschutz', rows);
+}
+
+/** Nach dem Sperren: laufende gesperrte Wiedergabe beenden, Liste neu aufbauen. */
+function afterLockChange() {
+  if (state.full && cur && isBlocked(cur)) { exitFull(); stopStream(); }
+  if (state.screen === 'browse') showBrowse(state.kind, 0, state.query);
+}
+
+function lockWatch() {
+  if (state.wasUnlocked && !unlocked()) {
+    state.wasUnlocked = false;
+    afterLockChange();
+    if (state.screen === 'settings') renderHome();
+  }
+}
+
+/* ---------------- Serien-Ordner und Zuletzt gesehen ---------------- */
+
+function folderize(items) {
+  const map = new Map();
+  const out = [];
+  for (const c of items) {
+    if (c.sTitle === undefined) { out.push(c); continue; }
+    const key = groupOf(c) + '\u0001' + c.sTitle.toLowerCase();
+    let f = map.get(key);
+    if (!f) {
+      f = { folder: true, name: c.sTitle, title: c.sTitle, group: c.group, kind: 'series', logo: c.logo, url: 'folder:' + key, eps: [], seas: new Set() };
+      map.set(key, f);
+      out.push(f);
+    }
+    f.eps.push(c);
+    f.seas.add(c.season);
+  }
+  for (const f of map.values()) {
+    f.eps.sort((a, b) => a.season - b.season || a.ep - b.ep || collator.compare(a.name, b.name));
+    f.seasons = f.seas.size;
+    if (!f.logo) f.logo = (f.eps.find((e) => e.logo) || {}).logo || '';
+  }
+  return out;
+}
+
+function pushRecent(ch) {
+  if (!ch || ch.folder) return;
+  const r = S.get('recent', []).filter((u) => u !== ch.url);
+  r.unshift(ch.url);
+  S.set('recent', r.slice(0, 30));
+}
+function recentItems(kind) {
   const hidden = new Set(S.get('hidden', []));
-  return state.channels.filter((c) => c.kind === kind && !hidden.has(groupOf(c)));
+  return S.get('recent', []).map((u) => state.byUrl && state.byUrl.get(u)).filter((c) => c && c.kind === kind && !hidden.has(groupOf(c)) && !isBlocked(c));
 }
 
 /* ---------------- EPG ---------------- */
@@ -219,6 +521,14 @@ const normName = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 function epgList(ch) {
   const e = state.epg;
   if (!e) return null;
+  if (ch._ek === e) return ch._el;
+  const r = epgLookup(ch, e);
+  ch._ek = e;
+  ch._el = r;
+  return r;
+}
+
+function epgLookup(ch, e) {
   if (ch.tvgId && e.channels[ch.tvgId]) return e.channels[ch.tvgId];
   const variants = [ch.name, ch.name.replace(/^[^:]*:\s*/, ''), ch.name.replace(/\b(hd|fhd|uhd|4k|sd|raw)\b/gi, '')];
   for (const v of variants) {
@@ -445,7 +755,7 @@ const BUF = [
   },
   {
     name: 'Normal', stall: 15,
-    ts: { enableStashBuffer: true, stashInitialSize: 384 * 1024, liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 8, liveBufferLatencyMinRemain: 1.5, autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30 },
+    ts: { enableStashBuffer: true, stashInitialSize: 192 * 1024, liveBufferLatencyChasing: true, liveBufferLatencyMaxLatency: 8, liveBufferLatencyMinRemain: 1.5, autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30 },
     hls: { maxBufferLength: 30, maxMaxBufferLength: 120, backBufferLength: 30, liveSyncDurationCount: 3 }
   },
   {
@@ -506,8 +816,8 @@ async function showPerf() {
     },
     { label: 'Live-Vorschau in der Senderliste', value: onOff(S.get('preview', true)), pick: (back) => { S.set('preview', !S.get('preview', true)); back(); } },
     {
-      label: 'Verzögerung der Vorschau', value: PDELAYS[S.get('pdelay', 1)] + ' s',
-      pick: (back) => pickDialog('Verzögerung der Vorschau', PDELAYS.map((d) => d + ' Sekunden'), S.get('pdelay', 1), (k) => S.set('pdelay', k), back)
+      label: 'Verzögerung der Vorschau', value: PDELAYS[S.get('pdelay', 0)] + ' s',
+      pick: (back) => pickDialog('Verzögerung der Vorschau', PDELAYS.map((d) => d + ' Sekunden'), S.get('pdelay', 0), (k) => S.set('pdelay', k), back)
     },
     { label: 'Senderlogos laden', value: onOff(S.get('logos', true)), pick: (back) => { S.set('logos', !S.get('logos', true)); back(); } },
     {
@@ -528,8 +838,8 @@ async function showPerf() {
       }
     },
     {
-      label: 'Startanimation', value: INTRO_NAMES[INTRO_MODES.indexOf(S.get('intro', 'full'))] || INTRO_NAMES[0],
-      pick: (back) => pickDialog('Startanimation', INTRO_NAMES, Math.max(0, INTRO_MODES.indexOf(S.get('intro', 'full'))), (k) => S.set('intro', INTRO_MODES[k]), back)
+      label: 'Startanimation', value: INTRO_NAMES[INTRO_MODES.indexOf(S.get('intro', 'short'))] || INTRO_NAMES[0],
+      pick: (back) => pickDialog('Startanimation', INTRO_NAMES, Math.max(0, INTRO_MODES.indexOf(S.get('intro', 'short'))), (k) => S.set('intro', INTRO_MODES[k]), back)
     },
     { label: 'Startanimation jetzt ansehen', value: '', pick: () => { startIntro(null, true); } }
   ]);
@@ -552,7 +862,7 @@ function showThemes() {
 
 let introSkip = null;
 function startIntro(done, force) {
-  const mode = force && S.get('intro', 'full') === 'off' ? 'full' : S.get('intro', 'full');
+  const mode = force && S.get('intro', 'short') === 'off' ? 'full' : S.get('intro', 'short');
   const cv = $('#intro');
   if (mode === 'off' || !window.DJ64Intro || !cv) { if (done) done(); return; }
   const th = THEMES[S.get('theme', 0)] || THEMES[0];
@@ -679,9 +989,9 @@ function multiDialog(title, labels, checked, onSave, extra) {
   const buttons = [
     { label: 'Abbrechen' },
     {
-      label: 'Alle zeigen',
+      label: (extra && extra.allLabel) || 'Alle zeigen',
       onClick: () => {
-        onSave(labels.map(() => true));
+        onSave(labels.map(() => (extra && extra.allValue !== undefined ? extra.allValue : true)));
       }
     },
     { label: 'Speichern', primary: true, onClick: () => onSave(state2) }
@@ -882,26 +1192,64 @@ let chanList = null;
 let previewTimer = 0;
 
 function buildCats() {
-  const items = visibleOfKind(state.kind);
+  const kind = state.kind;
+  const items = visibleOfKind(kind);
   const favs = favSet();
   const counts = new Map();
-  for (const c of items) counts.set(groupOf(c), (counts.get(groupOf(c)) || 0) + 1);
-  const cats = [{ label: `Alle (${items.length})`, type: 'all' }, { label: `★ Favoriten (${items.filter((c) => favs.has(c.url)).length})`, type: 'fav' }];
-  for (const [g, n] of counts) cats.push({ label: `${g} (${n})`, type: 'group', group: g });
+  const seen = new Set();
+  let nAll = 0;
+  let nFav = 0;
+  const hide = S.get('pc.hide', false);
+  for (const c of items) {
+    if (isBlocked(c)) { if (!counts.has(groupOf(c))) counts.set(groupOf(c), 0); continue; }
+    const g = groupOf(c);
+    let unit = 1;
+    if (kind === 'series' && c.sTitle !== undefined) {
+      const key = g + '\u0001' + c.sTitle.toLowerCase();
+      if (seen.has(key)) unit = 0; else seen.add(key);
+    }
+    counts.set(g, (counts.get(g) || 0) + unit);
+    nAll += unit;
+    if (favs.has(c.url)) nFav++;
+  }
+  let groups = [...counts.keys()];
+  if (sortMode() === 1) {
+    groups.sort((a, b) => {
+      const la = lockedGroup(a) || ADULT_RE.test(a);
+      const lb = lockedGroup(b) || ADULT_RE.test(b);
+      return la !== lb ? (la ? 1 : -1) : collator.compare(a, b);
+    });
+  }
+  const cats = [
+    { label: `Alle (${nAll})`, type: 'all' },
+    { label: `★ Favoriten (${nFav})`, type: 'fav' },
+    { label: `⏱ Zuletzt gesehen (${recentItems(kind).length})`, type: 'recent' }
+  ];
+  for (const g of groups) {
+    const locked = lockedGroup(g) && !unlocked();
+    if (locked && hide) continue;
+    cats.push({ label: locked ? `🔒 ${g}` : `${g} (${counts.get(g) || 0})`, type: 'group', group: g, locked });
+  }
   return cats;
 }
 
 function chanRow(c, i) {
   const fav = favSet().has(c.url);
   let sub = c.group;
-  if (c.kind === 'live' && state.epg) {
+  let name = c.name;
+  if (c.folder) {
+    name = c.title;
+    sub = `${c.eps.length} ${c.eps.length === 1 ? 'Folge' : 'Folgen'} · ${c.seasons} ${c.seasons === 1 ? 'Staffel' : 'Staffeln'}`;
+  } else if (state.folder && c.sTitle !== undefined) {
+    sub = `Staffel ${c.season} · Folge ${c.ep}`;
+  } else if (c.kind === 'live' && state.epg) {
     const { cur } = upcoming(c, Date.now(), 0);
     if (cur) sub = cur[2];
   }
   const logo = c.logo && S.get('logos', true)
     ? `<img class="logo" src="${esc(c.logo)}" loading="lazy" referrerpolicy="no-referrer">`
     : '<div class="logo none"></div>';
-  return `<div class="num">${i + 1}</div>${logo}<div class="txt"><div class="nm">${fav ? '★ ' : ''}${esc(c.name)}</div><div class="sb">${esc(sub)}</div></div>`;
+  return `<div class="num">${i + 1}</div>${logo}<div class="txt"><div class="nm">${fav ? '★ ' : ''}${c.folder ? '📁 ' : ''}${esc(name)}</div><div class="sb">${esc(sub)}</div></div>`;
 }
 
 function refreshRows() {
@@ -913,6 +1261,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
   state.kind = kind;
   state.cat = cat;
   state.query = query;
+  state.folder = null;
   const live = kind === 'live';
   if (!live || !S.get('preview', true)) stopStream();
   clearTimeout(previewTimer);
@@ -920,7 +1269,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
   const root = $('#browse');
   root.innerHTML = `
     <div class="head">
-      <h1>${esc(KIND_NAME[kind])}${query ? ` · Suche: ${esc(query)}` : ''}</h1>
+      <h1 id="bh">${esc(KIND_NAME[kind])}${query ? ` · Suche: ${esc(query)}` : ''}</h1>
       ${ibtn('search', 'search', 'Suchen (Strg+F)')}
       ${ibtn('settings', 'settings', 'Einstellungen')}
       ${ibtn('fullscreen', 'winfull', 'Vollbild (F11)')}
@@ -936,7 +1285,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
         <div class="pdesc" id="pd"></div><div class="pnext" id="px"></div>
       </div>` : ''}
     </div>
-    <div class="hint">Enter oder Doppelklick = Abspielen  ·  F oder Rechtsklick = Favorit  ·  Esc = Startseite</div>`;
+    <div class="hint">Enter oder Doppelklick = Abspielen / Ordner öffnen  ·  F oder Rechtsklick = Favorit  ·  Esc = zurück</div>`;
 
   state.cats = buildCats();
   const hasAny = visibleOfKind(kind).length > 0;
@@ -951,7 +1300,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
   state.cat = Math.min(cat, state.cats.length - 1);
   catList.select(state.cat);
 
-  catList.onClick = (i) => { selectCat(i); setZone('list'); };
+  catList.onClick = (i) => { selectCat(i); enterCat(); };
   chanList.onClick = (i) => { setZone('list'); selectItem(i, false); };
   chanList.onDbl = (i) => { playFull(i); };
   chanList.onCtx = (i) => { toggleFav(state.items[i]); };
@@ -966,22 +1315,70 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
 }
 
 function fillItems(sel = 0) {
-  let items = visibleOfKind(state.kind);
+  const kind = state.kind;
+  const base = visibleOfKind(kind);
   const q = state.query.trim().toLowerCase();
   const cat = state.cats[state.cat];
-  if (q) items = items.filter((c) => c.name.toLowerCase().includes(q));
-  else if (cat && cat.type === 'fav') {
+  const free = (c) => !isBlocked(c);
+  let items;
+  state.catLocked = false;
+  if (state.folder) items = state.folder.eps.filter(free);
+  else if (q) items = base.filter((c) => free(c) && c.name.toLowerCase().includes(q));
+  else if (!cat || cat.type === 'all') items = base.filter(free);
+  else if (cat.type === 'fav') {
     const f = favSet();
-    items = items.filter((c) => f.has(c.url));
-  } else if (cat && cat.type === 'group') items = items.filter((c) => groupOf(c) === cat.group);
+    items = base.filter((c) => f.has(c.url) && free(c));
+  } else if (cat.type === 'recent') items = recentItems(kind);
+  else if (cat.locked) { items = []; state.catLocked = true; } else items = base.filter((c) => groupOf(c) === cat.group && free(c));
+  if (kind === 'series' && !state.folder && !q && (!cat || cat.type === 'all' || cat.type === 'group')) items = folderize(items);
   state.items = items;
+  const host = $('#p-list');
+  if (host) {
+    if (state.catLocked) host.dataset.msg = '🔒 Gesperrt – Enter drücken und PIN eingeben';
+    else if (!items.length) host.dataset.msg = 'Hier ist nichts.';
+    else delete host.dataset.msg;
+  }
+  const bh = $('#bh');
+  if (bh) bh.textContent = KIND_NAME[kind] + (state.query ? ` · Suche: ${state.query}` : '') + (state.folder ? ` · ${state.folder.title}` : '');
   chanList.setItems(items);
   state.sel = Math.max(0, Math.min(sel, items.length - 1));
   chanList.select(items.length ? state.sel : -1);
   updatePane(items[state.sel]);
 }
 
+function openFolder(f, index) {
+  state.folder = f;
+  state.folderBack = { sel: index };
+  fillItems(0);
+  setZone('list');
+}
+
+function closeFolder() {
+  const back = state.folderBack ? state.folderBack.sel : 0;
+  state.folder = null;
+  fillItems(back);
+}
+
+/** Enter/Klick auf eine kategorie: gesperrte erst nach PIN öffnen. */
+function enterCat() {
+  const cat = state.cats[state.cat];
+  if (cat && cat.locked) {
+    askUnlock(() => {
+      state.cats = buildCats();
+      const i = state.cats.findIndex((c) => c.type === 'group' && c.group === cat.group);
+      state.cat = i >= 0 ? i : 0;
+      catList.setItems(state.cats, true);
+      catList.select(state.cat);
+      fillItems(0);
+      setZone('list');
+    });
+    return;
+  }
+  setZone('list');
+}
+
 function selectCat(i) {
+  state.folder = null;
   state.cat = Math.max(0, Math.min(i, state.cats.length - 1));
   catList.select(state.cat);
   fillItems(0);
@@ -1005,11 +1402,12 @@ function setZone(z) {
 }
 
 function toggleFav(ch) {
-  if (!ch) return;
-  const f = favSet();
+  if (!ch || ch.folder) return;
+  const f = new Set(favSet());
   let on;
   if (f.has(ch.url)) { f.delete(ch.url); on = false; } else { f.add(ch.url); on = true; }
   S.set('fav', [...f]);
+  favCache = null;
   toast(on ? '★ Favorit gespeichert' : 'Favorit entfernt', 1500);
   if (state.screen === 'browse' && chanList) {
     state.cats = buildCats();
@@ -1056,8 +1454,8 @@ function schedulePreview() {
   previewTimer = setTimeout(() => {
     if (state.screen !== 'browse' || state.kind !== 'live' || state.full || state.zone !== 'list') return;
     const ch = state.items[state.sel];
-    if (ch) startStream(ch);
-  }, PDELAYS[S.get('pdelay', 1)] * 1000);
+    if (ch && !ch.folder && !isBlocked(ch)) startStream(ch);
+  }, PDELAYS[S.get('pdelay', 0)] * 1000);
 }
 
 function showSearch(kind) {
@@ -1101,8 +1499,10 @@ function renderSettings() {
       ${t('image', 'Farbschemata', THEMES[S.get('theme', 0)].name, 'themes')}
       ${t('sun', 'Wetter', wxName(), 'weatherset')}
       ${t('play', 'Startanimation', 'Film-Intro', 'introset')}
+      ${t('lock', 'Jugendschutz', parentalOn() ? 'PIN aktiv' : 'Aus', 'parental')}
+      ${t('folder', 'Sortierung', sortMode() === 1 ? 'A–Z, Serien als Ordner' : 'Original', 'sortset')}
       ${t('trash', 'Cache leeren', '', 'cache')}
-      ${t('info', 'Info und Tasten', 'Version 1.1', 'info')}
+      ${t('info', 'Info und Tasten', 'Version 1.2', 'info')}
     </div>`;
   const f = $('#settings [data-act="account"]');
   if (f && !modals.length) f.focus();
@@ -1288,13 +1688,14 @@ function showInfo() {
   let host = '';
   try { host = new URL(playlistUrl()).host; } catch (e) { host = ''; }
   openModal({
-    title: 'DJ64 für Windows 1.1',
+    title: 'DJ64 für Windows 1.2',
     body: `<div>Live-TV: ${n.live} &nbsp; Filme: ${n.movie} &nbsp; Serien: ${n.series}<br>Favoriten: ${favSet().size}<br>Quelle: ${usesXtream() ? 'Xtream: ' + esc(host) + ' (Benutzer ' + esc(S.get('user', '')) + ')' : host ? 'M3U: ' + esc(host) : '(keine)'}</div>
     <div class="small" style="margin-top:1rem;line-height:1.7">
       <b>In der Liste</b><br>
       Pfeile = auswählen · Links/Rechts = Kategorien/Liste · Enter = Abspielen · F = Favorit · Strg+F = Suche · Esc = zurück<br>
       <b>Beim Abspielen</b><br>
       Live: Hoch/Runter = Sender wechseln · Film/Serie: Links/Rechts = Spulen, Hoch/Runter = Lautstärke<br>
+      Serien: Enter öffnet den Ordner einer Serie, Esc schließt ihn<br>
       Leertaste = Pause · M = Ton aus · A = Bildformat · I = Info · F11 = Vollbild · Esc = zurück
     </div>`,
     buttons: [{ label: 'OK', primary: true }]
@@ -1314,7 +1715,7 @@ async function refreshPlaylist() {
     await window.api.cacheWrite(text);
     setPlaylist(pl);
     toast(`${pl.channels.length} Einträge geladen`, 2500);
-    rerender();
+    if (state.screen !== 'browse' || !state.items.length) rerender();
     if (S.get('epgauto', true)) loadEpg(false);
   } catch (e) {
     toast('Playlist-Fehler: ' + errMsg(e) + (state.channels.length ? ' (gespeicherte Liste bleibt aktiv)' : ''), 6000);
@@ -1510,9 +1911,13 @@ window.addEventListener('resize', placePlayer);
 function playFull(index) {
   const ch = state.items[index];
   if (!ch) return;
+  if (ch.folder) { openFolder(ch, index); return; }
+  if (isBlocked(ch)) { askUnlock(() => fillItems(state.sel)); return; }
+  const list = state.items.filter((c) => !c.folder);
   state.sel = index;
-  state.play = { list: state.items, idx: index };
+  state.play = { list, idx: list.indexOf(ch) };
   S.set('last', ch.url);
+  pushRecent(ch);
   if (chanList) chanList.select(index);
   updatePane(ch);
   clearTimeout(previewTimer);
@@ -1539,19 +1944,26 @@ function exitFull() {
   setFull(false);
   clearTimeout(ctlTimer);
   if (state.kind !== 'live') stopStream();
-  else if (state.play) { selectItem(state.play.idx); setZone('list'); }
+  else if (state.play) { const pi = state.items.indexOf(state.play.list[state.play.idx]); selectItem(pi >= 0 ? pi : state.sel); setZone('list'); }
   osd(null);
 }
 
 function zap(d) {
   const p = state.play;
   if (!p || !p.list.length) return;
-  const idx = (p.idx + d + p.list.length) % p.list.length;
+  let idx = p.idx;
+  let tries = p.list.length;
+  do {
+    idx = (idx + d + p.list.length) % p.list.length;
+    tries--;
+  } while (tries > 0 && isBlocked(p.list[idx]));
+  if (isBlocked(p.list[idx])) return;
   p.idx = idx;
   const ch = p.list[idx];
   S.set('last', ch.url);
-  state.sel = idx;
-  if (chanList && state.items === p.list) chanList.select(idx);
+  pushRecent(ch);
+  const si = state.items.indexOf(ch);
+  if (chanList && si >= 0) { state.sel = si; chanList.select(si); }
   updatePane(ch);
   startStream(ch);
   osd(ch.name, 3000);
@@ -1706,10 +2118,10 @@ document.addEventListener('click', (e) => {
     movie: () => showBrowse('movie', 0),
     series: () => showBrowse('series', 0),
     favs: () => showBrowse('live', 1),
-    settings: () => renderSettings(),
+    settings: () => gate(() => renderSettings()),
     home: () => renderHome(),
     search: () => showSearch(),
-    account: () => showAccount(),
+    account: () => gate(() => showAccount()),
     refresh: () => refreshPlaylist(),
     winfull: () => window.api.toggleFullscreen(),
     cats: () => showCats(),
@@ -1723,7 +2135,9 @@ document.addEventListener('click', (e) => {
     weatherset: () => showWeatherSettings(),
     perf: () => showPerf(),
     themes: () => showThemes(),
-    introset: () => startIntro(null, true)
+    introset: () => startIntro(null, true),
+    parental: () => showParental(),
+    sortset: () => chooseDialog('Sortierung', ['Original (wie in der Playlist)', 'A–Z (Kategorien, Filme, Serien)'], sortMode(), (k) => { S.set('sort', k); state.sorted = {}; renderSettings(); })
   };
   if (go[act]) go[act]();
 });
@@ -1809,18 +2223,19 @@ function browseKey(e) {
     case 'PageUp': e.preventDefault(); move(cur2 - 10); break;
     case 'Home': e.preventDefault(); move(0); break;
     case 'End': e.preventDefault(); move(count - 1); break;
-    case 'ArrowRight': e.preventDefault(); if (state.zone === 'cats') setZone('list'); break;
+    case 'ArrowRight': e.preventDefault(); if (state.zone === 'cats') enterCat(); break;
     case 'ArrowLeft': e.preventDefault(); if (state.zone === 'list') setZone('cats'); break;
     case 'Enter':
       e.preventDefault();
-      if (state.zone === 'cats') setZone('list'); else playFull(state.sel);
+      if (state.zone === 'cats') enterCat(); else playFull(state.sel);
       break;
     case 'f': case 'F':
       if (state.zone === 'list') toggleFav(state.items[state.sel]);
       break;
     case 'Escape': case 'Backspace':
       e.preventDefault();
-      if (state.query) showBrowse(state.kind, 0, '');
+      if (state.folder) closeFolder();
+      else if (state.query) showBrowse(state.kind, 0, '');
       else renderHome();
       break;
     default: break;
@@ -1860,16 +2275,22 @@ window.addEventListener('offline', () => { if (state.screen === 'home') renderHo
 (async function init() {
   applyLook();
   video.volume = S.get('volume', 100) / 100;
-  try {
-    const cached = await window.api.cacheRead();
-    if (cached) setPlaylist(parseM3u(cached));
-  } catch (e) { /* kein Cache */ }
+  // Zuerst sofort zeichnen und das Intro starten, danach erst Daten laden (blockiert keine Eingabe).
   renderHome();
-  if (S.get('epgauto', true)) loadEpg(false);
-  loadWeather(false);
+  $('#intro').addEventListener('click', () => { if (introSkip) introSkip(); });
+  startIntro(() => { if (!playlistUrl()) showAccount(); });
   setInterval(() => loadWeather(false), 10 * 60 * 1000);
   setInterval(updateBufInfo, 1000);
-  $('#intro').addEventListener('click', () => { if (introSkip) introSkip(); });
-  if (playlistUrl()) refreshPlaylist();
-  startIntro(() => { if (!playlistUrl()) showAccount(); });
+  setInterval(lockWatch, 10000);
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    const cached = await window.api.cacheRead();
+    if (cached) {
+      setPlaylist(parseM3u(cached));
+      if (state.screen === 'home') renderHome();
+    }
+  } catch (e) { /* kein Cache */ }
+  if (S.get('epgauto', true)) setTimeout(() => loadEpg(false), 300);
+  setTimeout(() => loadWeather(false), 100);
+  if (playlistUrl()) setTimeout(refreshPlaylist, 600);
 })();

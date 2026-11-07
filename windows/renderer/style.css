@@ -197,3 +197,6 @@ svg.ic { fill: currentColor; flex: none; }
 body[data-anim="1"] .tile:hover, body[data-anim="1"] .tile:focus-visible, body[data-anim="1"] .ibtn:hover { transform: none; }
 body[data-anim="2"] *, body[data-anim="2"] *::before, body[data-anim="2"] *::after { transition: none !important; animation: none !important; }
 body[data-anim="2"] .tile:hover, body[data-anim="2"] .tile:focus-visible, body[data-anim="2"] .ibtn:hover { transform: none; }
+
+#p-list[data-msg]::after { content: attr(data-msg); position: absolute; left: 0; right: 0; top: 40%; text-align: center; font-size: 1.15rem; color: var(--text-dim); padding: 0 1.5rem; pointer-events: none; }
+.panel.vlist { position: relative; inset: auto; }

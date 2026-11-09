@@ -1,6 +1,6 @@
 'use strict';
 
-// Kopiert die Oberfläche (public/), die Quellen und den Spielplan in die Android-App.
+// Kopiert die Oberfläche (public/), die Quellen, den Spielplan, die Tabellen und die TV-Sender in die Android-App.
 // Nach Änderungen an public/, sources.json oder fixtures.json einmal ausführen: node tools/sync-android.js
 
 const fs = require('fs');
@@ -12,7 +12,7 @@ const dest = path.join(root, 'android', 'app', 'src', 'main', 'assets', 'www');
 fs.rmSync(dest, { recursive: true, force: true });
 fs.mkdirSync(dest, { recursive: true });
 fs.cpSync(path.join(root, 'public'), dest, { recursive: true });
-for (const f of ['sources.json', 'fixtures.json']) {
+for (const f of ['sources.json', 'fixtures.json', 'standings.json', 'tv.json']) {
   fs.copyFileSync(path.join(root, f), path.join(dest, f));
 }
 console.log('Android-Assets aktualisiert:', path.relative(root, dest));

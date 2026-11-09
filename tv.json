@@ -1,0 +1,76 @@
+{
+  "updatedAt": "2026-11-08",
+  "note": "Übertragungsrechte ändern sich. Die Angaben stammen aus Presseberichten (Quelle und Stand je Eintrag). Einträge kannst du in dieser Datei jederzeit ändern.",
+  "competitions": [
+    {
+      "id": "superlig",
+      "sport": "futbol",
+      "name": "Trendyol Süper Lig",
+      "match": ["super lig"],
+      "channels": [{ "name": "beIN Sports", "type": "tv", "free": false }],
+      "asOf": "2026-11",
+      "note": "Saison 2026-27",
+      "source": "https://www.cnbce.com/spor-ekonomisi/2026-2027-futbol-sezonu-yayin-rehberi-hangi-lig-hangi-kanalda-h33883"
+    },
+    {
+      "id": "tr-kupa",
+      "sport": "futbol",
+      "name": "Ziraat Türkiye Kupası",
+      "match": ["turkiye kupasi", "ziraat"],
+      "channels": [{ "name": "ATV", "type": "tv" }, { "name": "A Spor", "type": "tv" }],
+      "asOf": "2026-11",
+      "note": "Saison 2026-27",
+      "source": "https://www.cnbce.com/spor-ekonomisi/2026-2027-futbol-sezonu-yayin-rehberi-hangi-lig-hangi-kanalda-h33883"
+    },
+    {
+      "id": "uefa",
+      "sport": "futbol",
+      "name": "UEFA Champions, Europa und Conference League",
+      "match": ["sampiyonlar ligi", "champions league", "avrupa ligi", "europa league", "konferans ligi", "conference league"],
+      "channels": [{ "name": "TRT", "type": "tv" }, { "name": "tabii", "type": "stream" }],
+      "asOf": "2026-11",
+      "note": "Saison 2026-27",
+      "source": "https://www.cnbce.com/spor-ekonomisi/2026-2027-futbol-sezonu-yayin-rehberi-hangi-lig-hangi-kanalda-h33883"
+    },
+    {
+      "id": "euroleague",
+      "sport": "basketbol",
+      "name": "EuroLeague (Basketball)",
+      "match": ["euroleague", "euro league"],
+      "channels": [{ "name": "S Sport", "type": "tv", "free": false }, { "name": "S Sport Plus", "type": "tv", "free": false }],
+      "asOf": "2026-01",
+      "note": "Für die Saison 2025-26 belegt. Für 2026-27 wurde eine Verlängerung der Medienrechte gemeldet, bitte vor dem Spiel prüfen.",
+      "source": "https://www.aspor.com.tr/fenerbahce/2026/01/29/fenerbahce-beko-anadolu-efes-maci-izle-ne-zaman-saat-kacta-hangi-kanalda/amp"
+    },
+    {
+      "id": "bsl",
+      "sport": "basketbol",
+      "name": "Basketbol Süper Ligi",
+      "match": ["basketbol super ligi", "bsl"],
+      "channels": [{ "name": "beIN Sports 5", "type": "tv", "free": false }, { "name": "TOD", "type": "stream", "free": false }],
+      "asOf": "2026-09-27",
+      "note": "Nicht frei empfangbar. Die Senderziffer kann je Spiel wechseln.",
+      "source": "https://www.milligazete.com.tr/bahcesehir-koleji-fenerbahce-maci-bein-sports-5te-mi-sifresiz-mi-saat-kacta-youtubeda-var-mi"
+    },
+    {
+      "id": "sultanlar",
+      "sport": "voleybol",
+      "name": "Vodafone Sultanlar Ligi (Volleyball)",
+      "match": ["sultanlar ligi", "sultanlar"],
+      "channels": [{ "name": "TVF Voleybol TV (YouTube)", "type": "stream", "free": true }],
+      "asOf": "2026-10-04",
+      "note": "Ein Spiel vom 4. Oktober lief als Stream ohne TV-Kanal. Ob alle Spiele so laufen, ist nicht belegt.",
+      "source": "https://www.milligazete.com.tr/fenerbahce-manisa-voleybol-maci-canli-izle-tvf-voleybol-tv-yayin-ekrani"
+    },
+    {
+      "id": "cev-cl",
+      "sport": "voleybol",
+      "name": "CEV Champions League (Frauen)",
+      "match": ["cev"],
+      "channels": [{ "name": "S Sport", "type": "tv", "free": false }],
+      "asOf": "2023-11",
+      "note": "Quelle von 2023, vermutlich überholt. Bitte aktuell prüfen.",
+      "source": "https://www.cnnturk.com/spor/voleybol/fenerbahce-opet-calcit-kamnik-maci-ne-zaman-saat-kacta-hangi-kanalda-2059270"
+    }
+  ]
+}

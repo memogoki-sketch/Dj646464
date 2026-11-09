@@ -81,20 +81,19 @@ Neue Feeds ergänzt du so (danach Server neu starten, in der App neu bauen):
 - **Laufband** mit den neuesten Schlagzeilen, **NEU**-Markierung für Meldungen der letzten 3 Stunden, gelesene Artikel werden abgeblendet.
 - **Start-Animation** in Vereinsfarben (Klick überspringt sie). Das Vereinswappen ist bewusst nicht nachgezeichnet.
 
-## Spielplan und Ergebnisse
+## Tabelle, Spiele und TV-Sender
 
-Dafür gibt es keine kostenlose, verlässliche Datenquelle. Du pflegst die Spiele in `fixtures.json` (Vorlage: `fixtures.example.json`):
+Oben in der App wechselst du zwischen **Nachrichten, Tabelle, Spiele und TV-Sender**. Die Sportart-Tabs (Fußball, Basketball, …) filtern alle vier Bereiche.
 
-```json
-{ "fixtures": [
-  { "sport": "futbol", "competition": "Süper Lig", "home": "Fenerbahçe", "away": "Gegner",
-    "date": "2026-11-01T18:00:00+03:00", "venue": "Stadion" },
-  { "sport": "basketbol", "home": "Gegner", "away": "Fenerbahçe",
-    "date": "2026-10-20T20:00:00+03:00", "homeScore": 80, "awayScore": 85 }
-] }
-```
+- **Tabelle (live):** Süper Lig, automatisch abgerufen (ESPN, Ersatz: TheSportsDB), alle 2 Minuten. Fenerbahçe ist hervorgehoben. Fällt die Quelle aus, bleibt der letzte Stand sichtbar und ist als „nicht erreichbar“ markiert. Andere Tabellen (EuroLeague, Sultanlar Ligi, …) trägst du in `standings.json` ein (Vorlage: `standings.example.json`).
+- **Spiele:** Nächste Spiele, laufende Spiele (LIVE mit Minute und Stand) und letzte Ergebnisse, mit Sender-Filter. Live-Spiele kommen für die Süper Lig automatisch; alle anderen Sportarten pflegst du in `fixtures.json` (Vorlage: `fixtures.example.json`). Ohne `homeScore`/`awayScore` ist ein Spiel anstehend, mit Ergebnis steht es bei den Ergebnissen. Optional `"tv": "beIN Sports"` überschreibt den Sender eines Spiels.
+- **TV-Sender:** Welcher Wettbewerb läuft auf welchem Kanal (Fernsehen oder Stream, frei oder Abo), mit Quelle und Stand. Gepflegt in `tv.json`. Einträge, die älter als etwa fünf Monate sind, werden als „bitte prüfen“ markiert, denn Übertragungsrechte ändern sich.
 
-Ohne `homeScore`/`awayScore` steht das Spiel unter „Nächste Spiele“, mit Ergebnis unter „Letzte Ergebnisse“. Unter Windows wirken Änderungen sofort; in der Android-App erst nach neuem Bauen.
+Die Sender gelten für die Türkei (beIN Sports, S Sport, TRT, …). In Deutschland laufen die Spiele oft woanders.
+
+Wichtig: Die Live-Schnittstellen (inoffizielle ESPN-JSON-Adressen, TheSportsDB) konnten bei der Entwicklung nicht gegen das echte Internet getestet werden, nur gegen einen Nachbau. Unter „Quellenstatus“ siehst du, ob sie bei dir funktionieren. Wenn nicht, funktionieren `standings.json` und `fixtures.json` weiterhin.
+
+Unter Windows wirken Änderungen an den Dateien sofort; in der Android-App erst nach neuem Bauen.
 
 ## Aufbau
 

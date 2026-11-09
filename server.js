@@ -7,6 +7,7 @@ const engine = require('./public/shared/engine');
 const { SPORTS } = require('./public/shared/classify');
 const { getText } = require('./lib/http');
 const { loadFixturesFile } = require('./lib/fixtures');
+const { createLiveStore } = require('./lib/livestore');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -16,6 +17,7 @@ const SOURCES_FILE = process.env.SOURCES_FILE || path.join(__dirname, 'sources.j
 const cfg = JSON.parse(fs.readFileSync(SOURCES_FILE, 'utf8'));
 const io = { getText };
 
+const liveStore = createLiveStore({ root: __dirname, liveCfg: cfg.live, fixturesFile: FIXTURES_FILE });
 const cache = { items: [], status: [], updatedAt: null, refreshing: null };
 const imageCache = new Map();
 
@@ -93,10 +95,14 @@ function handleApi(req, res, url) {
       errors: data.errors,
     });
   }
+  if (url.pathname === '/api/live') return sendJson(res, 200, liveStore.view());
   if (url.pathname === '/api/sports') return sendJson(res, 200, SPORTS);
-  if (url.pathname === '/api/status') return sendJson(res, 200, { updatedAt: cache.updatedAt, sources: cache.status });
+  if (url.pathname === '/api/status') {
+    return sendJson(res, 200, { updatedAt: cache.updatedAt, sources: cache.status.concat(liveStore.state.result.status) });
+  }
   if (url.pathname === '/api/refresh' && req.method === 'POST') {
     refresh();
+    liveStore.refresh();
     return sendJson(res, 202, { started: true });
   }
   return sendJson(res, 404, { error: 'Nicht gefunden' });
@@ -124,7 +130,9 @@ const server = http.createServer((req, res) => {
 
 if (require.main === module) {
   refresh();
+  liveStore.refresh();
   setInterval(refresh, cfg.refreshMinutes * 60000).unref();
+  setInterval(() => liveStore.refresh(), Math.max(30, (cfg.live && cfg.live.refreshSeconds) || 120) * 1000).unref();
   server.listen(PORT, HOST, () => console.log(`Fenerbahçe News läuft auf http://localhost:${PORT}`));
 }
 

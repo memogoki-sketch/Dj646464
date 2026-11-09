@@ -6,6 +6,13 @@
 
   const SPORT_KEYS = ['futbol', 'basketbol', 'voleybol', 'diger'];
 
+  // "beIN Sports, S Sport" oder ["beIN Sports", "S Sport"] -> Liste von Sendernamen
+  function normTv(v) {
+    if (v === undefined || v === null || v === '') return [];
+    const arr = Array.isArray(v) ? v : String(v).split(',');
+    return arr.map((x) => String(x).trim()).filter(Boolean);
+  }
+
   // Prüft einen Eintrag und liefert entweder ein bereinigtes Objekt oder eine Fehlermeldung.
   function normalizeFixture(raw, index) {
     const where = 'Eintrag ' + (index + 1);
@@ -32,6 +39,7 @@
         venue: String(raw.venue || ''),
         homeScore,
         awayScore,
+        tv: normTv(raw.tv),
       },
     };
   }

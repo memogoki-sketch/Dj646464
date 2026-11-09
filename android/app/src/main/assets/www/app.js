@@ -14,10 +14,11 @@
     ticker: $('ticker'), tickerTrack: $('ticker-track'),
     statusBtn: $('status-btn'), statusDialog: $('status-dialog'), statusList: $('status-list'),
     fixtures: $('fixtures'), fxUpcoming: $('fx-upcoming'), fxResults: $('fx-results'),
+    panelTable: $('panel-table'), panelMatches: $('panel-matches'), panelTv: $('panel-tv'),
     lb: $('lightbox'), lbImg: $('lb-img'), lbTitle: $('lb-title'), lbMeta: $('lb-meta'), lbOpen: $('lb-open'),
   };
 
-  const state = { sport: 'all', q: '', view: 'cards', items: [], updatedAt: null, fixtures: null, shown: PAGE, loaded: false, lbList: [], lbIndex: 0 };
+  const state = { sport: 'all', q: '', view: 'cards', items: [], updatedAt: null, live: null, mode: 'news', tableId: null, channel: null, shown: PAGE, loaded: false, lbList: [], lbIndex: 0 };
 
   // ---------- Hilfsfunktionen ----------
 
@@ -121,8 +122,8 @@
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       },
-      async fixtures() {
-        const res = await fetch('/api/fixtures');
+      async live() {
+        const res = await fetch('/api/live');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       },
@@ -192,11 +193,44 @@
     if (stale) refresh().catch(() => {});
     setInterval(() => refresh().catch(() => {}), 15 * 60000);
 
+    // Live-Daten (Tabelle, Spiele): Abruf direkt aus der App, letzter Stand bleibt für den Offline-Start gespeichert.
+    let liveResult = { tables: [], matches: [], status: [] };
+    let liveAt = null;
+    try {
+      const saved = JSON.parse(store('fbLiveCache') || 'null');
+      if (saved && Array.isArray(saved.tables) && Array.isArray(saved.matches)) { liveResult = saved; liveAt = saved.fetchedAt || null; }
+    } catch (e) { /* ohne Cache starten */ }
+    let liveRunning = null;
+
+    function refreshLive() {
+      if (liveRunning) return liveRunning;
+      liveRunning = (async () => {
+        const c = loadCfg();
+        liveResult = await FB.live.loadLive(c.live, io, liveResult);
+        liveAt = new Date().toISOString();
+        store('fbLiveCache', JSON.stringify(Object.assign({}, liveResult, { fetchedAt: liveAt })));
+        window.dispatchEvent(new Event('fb-live-updated'));
+      })().finally(() => { liveRunning = null; });
+      return liveRunning;
+    }
+
+    const liveStale = !liveAt || Date.now() - Date.parse(liveAt) > 2 * 60000;
+    if (liveStale) refreshLive().catch(() => {});
+    setInterval(() => { if (!document.hidden) refreshLive().catch(() => {}); }, 2 * 60000);
+
     return {
       async news() { return { items: cache.items, updatedAt: cache.updatedAt, refreshing: Boolean(running) }; },
-      async fixtures() { return FB.fixtures.parseFixturesText(window.AndroidBridge.readAsset('www/fixtures.json')); },
-      async status() { return { updatedAt: cache.updatedAt, sources: cache.status }; },
-      async refresh() { await refresh(); },
+      async live() {
+        const c = loadCfg();
+        const read = (p) => window.AndroidBridge.readAsset(p);
+        const view = FB.live.buildView({ fixturesText: read('www/fixtures.json'), standingsText: read('www/standings.json'), tvText: read('www/tv.json') }, liveResult);
+        return Object.assign(view, {
+          updatedAt: liveAt, refreshing: Boolean(liveRunning), status: liveResult.status || [],
+          configured: Boolean(c.live && ((c.live.tables || []).length || (c.live.matches || []).length)),
+        });
+      },
+      async status() { return { updatedAt: cache.updatedAt, sources: cache.status.concat(liveResult.status || []) }; },
+      async refresh() { await Promise.all([refresh(), refreshLive()]); },
     };
   }
 
@@ -218,8 +252,8 @@
     for (const [key, info] of entries) {
       const btn = el('button', { class: 'tab', type: 'button', 'aria-pressed': String(state.sport === key) });
       btn.append((info.icon ? info.icon + ' ' : '') + info.label);
-      btn.append(el('span', { class: 'count', text: String(counts[key]) }));
-      btn.addEventListener('click', () => { state.sport = key; state.shown = PAGE; store('fbSport', key); render(); loadFixturesView(); });
+      if (state.mode === 'news') btn.append(el('span', { class: 'count', text: String(counts[key]) }));
+      btn.addEventListener('click', () => { state.sport = key; state.shown = PAGE; store('fbSport', key); render(); });
       els.tabs.append(btn);
     }
     document.querySelectorAll('.view').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === state.view)));
@@ -288,11 +322,8 @@
     }));
   }
 
-  function render() {
+  function renderNews() {
     const list = filtered();
-    renderTabs();
-    renderTicker();
-    els.updated.textContent = state.updatedAt ? 'Stand: ' + relativeTime(state.updatedAt) : (state.loaded ? '' : 'Lade …');
 
     const gallery = state.view === 'gallery';
     els.grid.hidden = gallery;
@@ -342,43 +373,292 @@
     }
   }
 
-  // ---------- Spiele ----------
+  // ---------- Bereiche: Spiele, Tabelle, TV-Sender ----------
 
-  function renderFixtureList(ul, list, withScore, highlightFirst) {
-    ul.replaceChildren();
-    if (!list.length) { ul.append(el('li', { class: 'fx-none', text: 'Keine Einträge' })); return; }
-    list.forEach((f, idx) => {
-      const sport = SPORTS[f.sport] || { icon: '' };
-      const meta = [sport.icon, f.competition, dayFmt.format(new Date(f.date)), f.venue].filter(Boolean).join(' · ');
-      const li = el('li', { class: highlightFirst && idx === 0 ? 'next' : '' }, [
-        el('span', { class: 'fx-teams', text: f.home + ' – ' + f.away }),
-        withScore ? el('span', { class: 'fx-score', text: f.homeScore + ':' + f.awayScore })
-          : (highlightFirst && idx === 0 ? el('span', { class: 'fx-when', text: relativeTime(f.date) }) : el('span')),
-        el('span', { class: 'fx-meta', text: meta }),
-      ]);
-      ul.append(li);
-    });
+  function pickSport(list) { return state.sport === 'all' ? list : list.filter((x) => x.sport === state.sport); }
+
+  function fmtDay(s) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium' }).format(new Date(s + 'T12:00:00'));
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? s : absFmt.format(new Date(t));
   }
 
-  function loadFixturesView() {
-    const data = state.fixtures;
-    if (!data) return;
-    const pick = (list) => (state.sport === 'all' ? list : list.filter((f) => f.sport === state.sport));
-    const up = pick(data.upcoming).slice(0, 8);
-    const res = pick(data.results).slice(0, 8);
-    const any = up.length || res.length || data.errors.length;
-    els.fixtures.hidden = !any;
-    renderFixtureList(els.fxUpcoming, up, false, true);
-    renderFixtureList(els.fxResults, res, true, false);
-    if (data.errors.length) {
-      els.notice.hidden = false;
-      els.notice.dataset.kind = 'fixtures';
-      els.notice.textContent = 'fixtures.json: ' + data.errors.slice(0, 3).join(' | ');
+  function channelBadge(ch) {
+    const access = ch.free === true ? 'frei' : ch.free === false ? 'Abo' : '';
+    const badge = el('span', { class: 'ch ' + ch.type, title: (ch.type === 'stream' ? 'Stream' : 'Fernsehen') + (access ? ' · ' + access : '') });
+    badge.append((ch.type === 'stream' ? '▶ ' : '📺 ') + ch.name);
+    if (access) badge.append(el('small', { class: ch.free ? 'free' : 'paid', text: access }));
+    return badge;
+  }
+
+  function channelRow(list, cls) { return el('div', { class: 'ch-row ' + (cls || '') }, list.map(channelBadge)); }
+
+  function hasChannel(f, name) { return (f.tvChannels || []).some((c) => c.name === name); }
+
+  function matchItem(f, opts) {
+    const live = f.status === 'live';
+    const sport = SPORTS[f.sport] || { icon: '' };
+    let right;
+    if (live || f.status === 'finished') right = el('span', { class: 'fx-score' + (live ? ' liveScore' : ''), text: f.homeScore + ':' + f.awayScore });
+    else if (f.status === 'postponed') right = el('span', { class: 'tag-warn', text: 'verschoben' });
+    else if (opts.highlight) right = el('span', { class: 'fx-when', text: relativeTime(f.date) });
+    else right = el('span');
+
+    const meta = el('span', { class: 'fx-meta' });
+    if (live) meta.append(el('span', { class: 'lv' }, [el('i'), 'LIVE' + (f.clock ? ' ' + f.clock : '')]), ' ');
+    meta.append([sport.icon, f.competition, dayFmt.format(new Date(f.date)), f.venue].filter(Boolean).join(' · '));
+
+    const li = el('li', { class: [opts.highlight ? 'next' : '', live ? 'is-live' : ''].join(' ').trim() }, [
+      el('span', { class: 'fx-teams', text: f.home + ' – ' + f.away }), right, meta,
+    ]);
+    if (f.tvChannels && f.tvChannels.length) li.append(channelRow(f.tvChannels, 'fx-tv'));
+    else if (opts.showNoTv && f.status !== 'finished') li.append(el('span', { class: 'fx-meta fx-tv', text: 'Sender nicht hinterlegt' }));
+    return li;
+  }
+
+  function fillMatchList(ul, list, opts) {
+    ul.replaceChildren();
+    if (!list.length) { ul.append(el('li', { class: 'fx-none', text: 'Keine Einträge' })); return; }
+    list.forEach((f, idx) => ul.append(matchItem(f, { highlight: Boolean(opts.highlightFirst) && idx === 0 && f.status !== 'live', showNoTv: opts.showNoTv })));
+  }
+
+  function boxList(title, list, opts) {
+    const ul = el('ul', { class: 'match-list' });
+    fillMatchList(ul, list, opts || {});
+    return el('div', { class: 'box' }, [el('h3', { text: title }), ul]);
+  }
+
+  function chipBar(label, options, current, onPick) {
+    const bar = el('div', { class: 'chips' }, [el('span', { class: 'lbl', text: label })]);
+    options.forEach((o) => {
+      const b = el('button', { type: 'button', class: 'chip', 'aria-pressed': String(o.value === current), text: o.label });
+      b.addEventListener('click', () => onPick(o.value));
+      bar.append(b);
+    });
+    return bar;
+  }
+
+  function channelNames(list) {
+    const names = [];
+    list.forEach((x) => (x.channels || x.tvChannels || []).forEach((c) => { if (names.indexOf(c.name) === -1) names.push(c.name); }));
+    return names;
+  }
+
+  function emptyHint(d, what, file) {
+    const failed = (d.status || []).filter((s) => !s.ok);
+    const msg = !d.configured ? 'Es ist keine Live-Quelle eingerichtet.'
+      : !d.updatedAt ? 'Die Live-Daten werden gerade geladen …'
+        : failed.length ? 'Die Live-Quelle ist nicht erreichbar (Details unter „Quellenstatus“).'
+          : 'Die Live-Quelle liefert aktuell keine Daten.';
+    return el('div', { class: 'box' + (failed.length ? ' warn' : '') }, [
+      el('strong', { text: 'Keine ' + what + ' vorhanden. ' }),
+      msg + ' Du kannst sie auch selbst in ' + file + ' eintragen (siehe README).',
+    ]);
+  }
+
+  // Kleiner Block auf der Nachrichten-Seite: nächste Spiele und letzte Ergebnisse
+  function renderFixturesBlock() {
+    const d = state.live;
+    if (!d || state.mode !== 'news') { els.fixtures.hidden = true; return; }
+    const m = d.matches;
+    const up = pickSport(m.live.concat(m.upcoming)).slice(0, 6);
+    const res = pickSport(m.results).slice(0, 6);
+    els.fixtures.hidden = !(up.length || res.length);
+    fillMatchList(els.fxUpcoming, up, { highlightFirst: true });
+    fillMatchList(els.fxResults, res, {});
+  }
+
+  function renderMatchesPanel() {
+    const root = els.panelMatches;
+    root.replaceChildren();
+    const d = state.live;
+    if (!d) { root.append(el('p', { class: 'empty', text: 'Lade …' })); return; }
+    const m = d.matches;
+    const names = channelNames(pickSport(m.live.concat(m.upcoming)));
+    if (state.channel && names.indexOf(state.channel) === -1) state.channel = null;
+    if (names.length) {
+      const opts = [{ value: null, label: 'Alle' }].concat(names.map((n) => ({ value: n, label: n })));
+      root.append(chipBar('Sender:', opts, state.channel, (v) => { state.channel = v; renderMatchesPanel(); }));
+    }
+    const byCh = (l) => (state.channel ? l.filter((f) => hasChannel(f, state.channel)) : l);
+    const live = byCh(pickSport(m.live));
+    const up = byCh(pickSport(m.upcoming)).slice(0, 25);
+    const res = byCh(pickSport(m.results)).slice(0, 15);
+
+    if (live.length) root.append(boxList('Läuft gerade', live, {}));
+    root.append(boxList('Nächste Spiele', up, { highlightFirst: !live.length, showNoTv: true }));
+    root.append(boxList('Letzte Ergebnisse', res, {}));
+    if (!live.length && !up.length && !res.length && !state.channel) root.append(emptyHint(d, 'Spiele', 'fixtures.json'));
+    root.append(el('p', { class: 'panel-note', text: 'Live-Stand: ' + (d.updatedAt ? relativeTime(d.updatedAt) : 'noch nicht geladen') + '. Eigene Spiele und Sender trägst du in fixtures.json ein, Sender je Wettbewerb in tv.json.' }));
+  }
+
+  function renderTablePanel() {
+    const root = els.panelTable;
+    root.replaceChildren();
+    const d = state.live;
+    if (!d) { root.append(el('p', { class: 'empty', text: 'Lade …' })); return; }
+    const tables = pickSport(d.tables);
+    if (!tables.length) { root.append(emptyHint(d, 'Tabellen', 'standings.json')); return; }
+    const t = tables.filter((x) => x.id === state.tableId)[0] || tables[0];
+    if (tables.length > 1) {
+      root.append(chipBar('Tabelle:', tables.map((x) => ({ value: x.id, label: x.name })), t.id, (v) => { state.tableId = v; renderTablePanel(); }));
+    }
+
+    const rows = t.rows;
+    const any = (fn) => rows.some(fn);
+    const cols = [
+      { h: 'Sp', get: (r) => r.played, show: any((r) => r.played !== null) },
+      { h: 'S', get: (r) => r.won, show: any((r) => r.won !== null) },
+      { h: 'U', get: (r) => r.drawn, show: any((r) => r.drawn !== null) },
+      { h: 'N', get: (r) => r.lost, show: any((r) => r.lost !== null) },
+      { h: t.goalsLabel || 'Tore', get: (r) => (r.gf !== null && r.ga !== null ? r.gf + ':' + r.ga : null), show: any((r) => r.gf !== null && r.ga !== null), opt: true },
+      { h: 'Diff', get: (r) => (r.gd === null ? null : (r.gd > 0 ? '+' + r.gd : String(r.gd))), show: any((r) => r.gd !== null), opt: true },
+      { h: 'Pkt', get: (r) => r.points, show: any((r) => r.points !== null), cls: 'pts' },
+    ].filter((c) => c.show);
+
+    const src = el('span', { class: 'src' + (t.stale ? ' stale' : '') });
+    if (t.source === 'live' && !t.stale) {
+      src.append(el('span', { class: 'lv' }, [el('i'), 'LIVE']), ' ' + t.sourceName + ' · aktualisiert ' + relativeTime(t.updatedAt));
+    } else if (t.stale) {
+      src.append('⚠ Live-Quelle nicht erreichbar · letzter Stand ' + relativeTime(t.updatedAt));
+    } else {
+      src.append('✎ ' + t.sourceName + (t.updatedAt ? ' · Stand ' + fmtDay(t.updatedAt) : ''));
+    }
+
+    const thead = el('tr', {}, [el('th', { text: '#' }), el('th', { class: 'team', text: 'Team' })].concat(cols.map((c) => el('th', { class: c.opt ? 'opt' : '', text: c.h }))));
+    const tbody = el('tbody');
+    rows.forEach((r) => {
+      const team = el('td', { class: 'team' });
+      if (r.logo) {
+        const img = el('img', { class: 'logo', src: r.logo, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' });
+        img.addEventListener('error', () => img.remove());
+        team.append(img);
+      }
+      team.append(r.team);
+      const tr = el('tr', { class: FB.live.isFener(r.team) ? 'me' : '' }, [el('td', { class: 'pos', text: String(r.rank) }), team]);
+      cols.forEach((c) => {
+        const v = c.get(r);
+        tr.append(el('td', { class: [c.cls || '', c.opt ? 'opt' : ''].join(' ').trim(), text: v === null || v === undefined ? '–' : String(v) }));
+      });
+      tbody.append(tr);
+    });
+
+    const legend = [];
+    if (cols.some((c) => c.h === 'Sp')) legend.push('Sp = Spiele');
+    if (cols.some((c) => c.h === 'S')) legend.push('S = Siege');
+    if (cols.some((c) => c.h === 'U')) legend.push('U = Unentschieden');
+    if (cols.some((c) => c.h === 'N')) legend.push('N = Niederlagen');
+    root.append(el('div', { class: 'box' }, [
+      el('div', { class: 'tbl-head' }, [el('h3', { text: t.name }), src]),
+      el('div', { class: 'tbl-wrap' }, [el('table', { class: 'tbl' }, [el('thead', {}, [thead]), tbody])]),
+    ]));
+    root.append(el('p', { class: 'panel-note', text: legend.join(' · ') + ' · Fenerbahçe ist hervorgehoben.' }));
+  }
+
+  function ageWarn(asOf) {
+    if (!asOf) return false;
+    const t = Date.parse(asOf.length === 7 ? asOf + '-01' : asOf);
+    return !Number.isNaN(t) && Date.now() - t > 150 * 86400000;
+  }
+
+  function renderTvPanel() {
+    const root = els.panelTv;
+    root.replaceChildren();
+    const d = state.live;
+    if (!d) { root.append(el('p', { class: 'empty', text: 'Lade …' })); return; }
+    const comps = d.tv.competitions.filter((c) => state.sport === 'all' || !c.sport || c.sport === state.sport);
+    const note = [d.tv.note, d.tv.updatedAt ? 'Stand der Sammlung: ' + fmtDay(d.tv.updatedAt) + '.' : ''].filter(Boolean).join(' ');
+    if (note) root.append(el('p', { class: 'panel-note', text: note }));
+    if (!comps.length) {
+      root.append(el('div', { class: 'box', text: 'Für diese Auswahl ist noch kein Sender hinterlegt. Du kannst Einträge in tv.json ergänzen (siehe README).' }));
+      return;
+    }
+    const names = channelNames(comps);
+    if (state.channel && names.indexOf(state.channel) === -1) state.channel = null;
+    if (names.length) {
+      const opts = [{ value: null, label: 'Alle' }].concat(names.map((n) => ({ value: n, label: n })));
+      root.append(chipBar('Sender:', opts, state.channel, (v) => { state.channel = v; renderTvPanel(); }));
+    }
+    const shown = state.channel ? comps.filter((c) => c.channels.some((ch) => ch.name === state.channel)) : comps;
+    const grid = el('div', { class: 'tv-grid' });
+    shown.forEach((c) => {
+      const sport = SPORTS[c.sport] || { icon: '🏅' };
+      const old = ageWarn(c.asOf);
+      const foot = el('div', { class: 'foot-line' });
+      const left = el('span', {});
+      left.append('Stand: ' + (c.asOf || 'unbekannt'));
+      if (old) left.append(' ', el('span', { class: 'old-tag', text: '· älter, bitte prüfen' }));
+      foot.append(left);
+      if (/^https?:\/\//i.test(c.source)) foot.append(el('a', { href: c.source, target: '_blank', rel: 'noopener noreferrer', text: 'Quelle ↗' }));
+      const card = el('div', { class: 'tv-card' + (old ? ' old' : '') }, [
+        el('h3', { text: sport.icon + ' ' + c.name }),
+        channelRow(c.channels),
+      ]);
+      if (c.note) card.append(el('p', { class: 'note', text: c.note }));
+      card.append(foot);
+      grid.append(card);
+    });
+    root.append(grid);
+
+    if (state.channel) {
+      const next = pickSport(d.matches.live.concat(d.matches.upcoming)).filter((f) => hasChannel(f, state.channel)).slice(0, 10);
+      root.append(boxList('Nächste Spiele auf ' + state.channel, next, { highlightFirst: true }));
     }
   }
 
-  async function loadFixtures() {
-    try { state.fixtures = await Data.fixtures(); loadFixturesView(); } catch (e) { /* Spiele sind optional */ }
+  function renderModes() {
+    document.querySelectorAll('.mode').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode));
+      if (b.dataset.mode === 'matches') b.classList.toggle('has-live', Boolean(state.live && state.live.matches.live.length));
+    });
+  }
+
+  function render() {
+    document.body.dataset.mode = state.mode;
+    renderTabs();
+    renderTicker();
+    renderModes();
+    const news = state.mode === 'news';
+    const stamp = news ? state.updatedAt : (state.live && state.live.updatedAt);
+    els.updated.textContent = stamp ? 'Stand: ' + relativeTime(stamp) : (state.loaded ? '' : 'Lade …');
+    els.panelTable.hidden = state.mode !== 'table';
+    els.panelMatches.hidden = state.mode !== 'matches';
+    els.panelTv.hidden = state.mode !== 'tv';
+    if (news) {
+      renderNews();
+    } else {
+      els.hero.hidden = true;
+      els.grid.hidden = true;
+      els.gallery.hidden = true;
+      els.empty.hidden = true;
+      els.more.hidden = true;
+    }
+    renderFixturesBlock();
+    if (state.mode === 'table') renderTablePanel();
+    else if (state.mode === 'matches') renderMatchesPanel();
+    else if (state.mode === 'tv') renderTvPanel();
+  }
+
+  let liveTimer = null;
+  async function loadLive() {
+    clearTimeout(liveTimer);
+    let delay = 120000;
+    try {
+      state.live = await Data.live();
+      const errs = state.live.errors || [];
+      if (errs.length) {
+        els.notice.hidden = false;
+        els.notice.dataset.kind = 'data';
+        els.notice.textContent = 'Hinweis zu deinen Dateien: ' + errs.slice(0, 3).join(' | ');
+      } else if (els.notice.dataset.kind === 'data') {
+        els.notice.hidden = true;
+        els.notice.dataset.kind = '';
+      }
+      render();
+      if (!state.live.updatedAt || state.live.refreshing) delay = 4000;
+      else if (state.live.matches.live.length) delay = 45000;
+    } catch (e) { /* Live-Daten sind optional, Nachrichten funktionieren weiter */ }
+    liveTimer = setTimeout(loadLive, delay);
   }
 
   // ---------- Bildansicht ----------
@@ -437,7 +717,7 @@
     try {
       await Data.refresh();
       await new Promise((r) => setTimeout(r, standalone ? 200 : 2500));
-      await load();
+      await Promise.all([load(), loadLive()]);
     } finally { els.refresh.disabled = false; }
   });
 
@@ -461,14 +741,23 @@
     const rows = (data.sources || []).map((s) => {
       const li = el('li');
       li.append(el('span', { class: s.ok ? 'ok' : 'fail', text: s.ok ? 'OK ' : 'Fehler ' }));
-      li.append(s.name + ': ' + (s.ok ? s.count + ' Artikel' : s.error));
+      li.append(s.name + ': ' + (s.ok ? s.count + (/^(tabelle|spiele):/.test(s.id || '') ? ' Einträge' : ' Artikel') : s.error));
       return li;
     });
     els.statusList.replaceChildren(...(rows.length ? rows : [el('li', { text: 'Noch keine Daten.' })]));
     els.statusDialog.showModal();
   });
 
+  document.querySelectorAll('.mode').forEach((b) => b.addEventListener('click', () => {
+    state.mode = b.dataset.mode;
+    state.channel = null;
+    store('fbMode', state.mode);
+    render();
+    window.scrollTo(0, 0);
+  }));
+
   window.addEventListener('fb-data-updated', load);
+  window.addEventListener('fb-live-updated', loadLive);
 
   (function init() {
     buildSplash();
@@ -476,10 +765,11 @@
     if (['cards', 'list', 'gallery'].includes(savedView)) state.view = savedView;
     const savedSport = store('fbSport');
     if (savedSport === 'all' || SPORTS[savedSport]) state.sport = savedSport;
+    const savedMode = store('fbMode');
+    if (['news', 'table', 'matches', 'tv'].includes(savedMode)) state.mode = savedMode;
     render();
     load();
-    loadFixtures();
+    loadLive();
     setInterval(load, 2 * 60 * 1000);
-    setInterval(loadFixtures, 10 * 60 * 1000);
   })();
 }());

@@ -262,5 +262,218 @@ function serve(handler) {
     assert.ok(cfg.sources.length >= 15);
   });
 
+  // ---------- Live-Tabelle, Spiele, TV ----------
+  const live = require('../public/shared/live');
+
+  const ESPN_STANDINGS = { children: [{ name: 'Trendyol Süper Lig', standings: { entries: [
+    { team: { displayName: 'Galatasaray', logos: [{ href: 'http://a.espncdn.com/g.png' }] }, stats: [
+      { name: 'rank', value: 2 }, { name: 'gamesPlayed', value: 10 }, { name: 'wins', value: 7 }, { name: 'ties', value: 2 }, { name: 'losses', value: 1 },
+      { name: 'pointsFor', value: 20 }, { name: 'pointsAgainst', value: 8 }, { name: 'pointDifferential', value: 12 }, { name: 'points', value: 23 }] },
+    { team: { displayName: 'Fenerbahce', logos: [{ href: 'https://a.espncdn.com/f.png' }] }, stats: [
+      { name: 'rank', value: 1 }, { name: 'gamesPlayed', value: 10 }, { name: 'wins', value: 7 }, { name: 'ties', value: 3 }, { name: 'losses', value: 0 },
+      { name: 'pointsFor', value: 24 }, { name: 'pointsAgainst', value: 7 }, { name: 'points', value: 24 }] },
+  ] } }] };
+
+  const espnEvent = (id, date, state, hs, as, extra) => Object.assign({
+    id, date,
+    status: { displayClock: "67'", type: { name: state === 'in' ? 'STATUS_IN_PROGRESS' : state === 'post' ? 'STATUS_FULL_TIME' : 'STATUS_SCHEDULED', state, completed: state === 'post', shortDetail: 'x' } },
+    competitions: [{ venue: { fullName: 'Şükrü Saracoğlu' }, competitors: [
+      { homeAway: 'home', score: String(hs), team: { displayName: 'Fenerbahce' } },
+      { homeAway: 'away', score: String(as), team: { displayName: 'Rizespor' } }] }],
+  }, extra || {});
+
+  await test('ESPN-Tabelle: Reihenfolge, Statistik, Tordifferenz, https-Logo', () => {
+    const rows = live.parseEspnStandings(ESPN_STANDINGS);
+    assert.deepStrictEqual(rows.map((r) => r.team), ['Fenerbahce', 'Galatasaray']);
+    assert.strictEqual(rows[0].rank, 1);
+    assert.strictEqual(rows[0].gd, 17, 'Differenz wird aus Toren berechnet, wenn sie fehlt');
+    assert.strictEqual(rows[1].logo, 'https://a.espncdn.com/g.png', 'http wird zu https');
+    assert.strictEqual(rows[1].drawn, 2);
+    assert.deepStrictEqual(live.parseEspnStandings({}), []);
+    assert.deepStrictEqual(live.parseEspnStandings(null), []);
+  });
+
+  await test('ESPN-Tabelle: ohne Platz-Angabe nach Punkten und Differenz sortiert', () => {
+    const noRank = JSON.parse(JSON.stringify(ESPN_STANDINGS));
+    noRank.children[0].standings.entries.forEach((e) => { e.stats = e.stats.filter((s) => s.name !== 'rank'); });
+    const rows = live.parseEspnStandings(noRank);
+    assert.deepStrictEqual(rows.map((r) => [r.rank, r.team]), [[1, 'Fenerbahce'], [2, 'Galatasaray']]);
+  });
+
+  await test('TheSportsDB-Tabelle wird gelesen', () => {
+    const rows = live.parseSportsDbTable({ table: [
+      { intRank: '2', strTeam: 'B', intPlayed: '5', intWin: '3', intDraw: '1', intLoss: '1', intGoalsFor: '9', intGoalsAgainst: '5', intGoalDifference: '4', intPoints: '10' },
+      { intRank: '1', strTeam: 'A', intPlayed: '5', intWin: '4', intDraw: '1', intLoss: '0', intGoalsFor: '12', intGoalsAgainst: '3', intGoalDifference: '9', intPoints: '13', strBadge: 'http://x/y.png' },
+    ] });
+    assert.deepStrictEqual(rows.map((r) => r.team), ['A', 'B']);
+    assert.strictEqual(rows[0].points, 13);
+    assert.strictEqual(rows[0].logo, 'https://x/y.png');
+    assert.deepStrictEqual(live.parseSportsDbTable({ table: null }), []);
+  });
+
+  await test('ESPN-Spiele: nur Fenerbahçe, Status, Live-Stand, Ergebnis', () => {
+    const other = espnEvent('9', '2026-11-20T17:00Z', 'pre', 0, 0);
+    other.competitions[0].competitors[0].team.displayName = 'Besiktas';
+    other.competitions[0].competitors[1].team.displayName = 'Galatasaray';
+    const json = { events: [
+      espnEvent('1', '2026-11-08T17:00Z', 'in', 1, 0),
+      espnEvent('2', '2026-11-01T17:00Z', 'post', 3, 1),
+      espnEvent('3', '2026-11-29T17:00Z', 'pre', 0, 0),
+      espnEvent('4', '2026-12-06T17:00Z', 'pre', 0, 0, { status: { type: { name: 'STATUS_POSTPONED', state: 'pre' } } }),
+      other,
+      { id: 'kaputt', date: 'x', competitions: [] },
+    ] };
+    const list = live.parseEspnScoreboard(json, { team: 'fenerbahce', sport: 'futbol', competition: 'Trendyol Süper Lig' });
+    assert.strictEqual(list.length, 4, 'fremde und defekte Einträge fallen weg');
+    assert.deepStrictEqual(list.map((m) => m.status), ['live', 'finished', 'scheduled', 'postponed']);
+    assert.strictEqual(list[0].homeScore, 1);
+    assert.strictEqual(list[0].clock, "67'");
+    assert.strictEqual(list[1].awayScore, 1);
+    assert.strictEqual(list[2].homeScore, null, 'geplante Spiele haben kein Ergebnis');
+    assert.strictEqual(list[2].clock, '');
+    assert.strictEqual(list[0].competition, 'Trendyol Süper Lig');
+    assert.strictEqual(list[0].venue, 'Şükrü Saracoğlu');
+  });
+
+  const TV_TEXT = fs.readFileSync(path.join(__dirname, '..', 'tv.json'), 'utf8');
+
+  await test('tv.json: gültig, Quellen vorhanden, Sender normalisiert', () => {
+    const tv = live.parseTvText(TV_TEXT);
+    assert.deepStrictEqual(tv.errors, []);
+    assert.ok(tv.competitions.length >= 6);
+    for (const c of tv.competitions) {
+      assert.ok(c.channels.length > 0, c.id);
+      assert.ok(c.asOf, c.id + ' ohne Stand');
+      assert.match(c.source, /^https:\/\//, c.id + ' ohne Quelle');
+    }
+    const bsl = tv.competitions.find((c) => c.id === 'bsl');
+    assert.deepStrictEqual(bsl.channels.map((c) => c.type), ['tv', 'stream']);
+    const m = live.parseTvText('{"competitions":[{"name":"X","channels":["Eins",{"name":"Zwei","type":"stream","free":true},{"nope":1}]},{"x":1}]}');
+    assert.deepStrictEqual(m.competitions[0].channels, [{ name: 'Eins', type: 'tv', free: null }, { name: 'Zwei', type: 'stream', free: true }]);
+    assert.strictEqual(m.errors.length, 1);
+    assert.strictEqual(live.parseTvText('{kaputt').errors.length, 1);
+    assert.deepStrictEqual(live.parseTvText('').competitions, []);
+  });
+
+  await test('Sender-Zuordnung: nach Wettbewerb, Sportart, eigene Angabe, keine Fehltreffer', () => {
+    const comps = live.parseTvText(TV_TEXT).competitions;
+    const names = (f) => live.resolveTv(f, comps).map((c) => c.name);
+    assert.deepStrictEqual(names({ sport: 'futbol', competition: 'Trendyol Süper Lig' }), ['beIN Sports']);
+    assert.deepStrictEqual(names({ sport: 'futbol', competition: 'Süper Lig, 12. Spieltag' }), ['beIN Sports']);
+    assert.deepStrictEqual(names({ sport: 'futbol', competition: 'Ziraat Türkiye Kupası' }), ['ATV', 'A Spor']);
+    assert.deepStrictEqual(names({ sport: 'futbol', competition: 'UEFA Europa League' }), ['TRT', 'tabii']);
+    assert.deepStrictEqual(names({ sport: 'basketbol', competition: 'EuroLeague' }), ['S Sport', 'S Sport Plus']);
+    assert.deepStrictEqual(names({ sport: 'basketbol', competition: 'BSL Play-off' }), ['beIN Sports 5', 'TOD']);
+    assert.deepStrictEqual(names({ sport: 'voleybol', competition: 'Sultanlar Ligi' }), ['TVF Voleybol TV (YouTube)']);
+    assert.deepStrictEqual(names({ sport: 'voleybol', competition: 'EuroLeague' }), [], 'falsche Sportart darf nicht passen');
+    assert.deepStrictEqual(names({ sport: 'basketbol', competition: 'Absl Cup' }), [], 'Wortanfang: "bsl" trifft nicht "absl"');
+    assert.deepStrictEqual(names({ sport: 'diger', competition: '' }), []);
+    assert.deepStrictEqual(names({ sport: 'futbol', competition: 'Süper Lig', tv: ['beIN Sports', 'Neuer Sender'] }), ['beIN Sports', 'Neuer Sender']);
+    assert.strictEqual(live.resolveTv({ sport: 'futbol', competition: 'x', tv: ['beIN Sports'] }, comps)[0].free, false, 'bekannte Sender übernehmen ihre Eigenschaften');
+  });
+
+  await test('Tabellen eigener Datei: prüfen, Plätze, Differenz, Fehler melden', () => {
+    const r = live.parseStandingsText(JSON.stringify({ tables: [
+      { id: 'a', sport: 'basketbol', name: 'EL', goalsLabel: 'Punkte', rows: [{ team: 'X', played: 2, won: 2, lost: 0, gf: 160, ga: 140, points: 4 }, { team: 'Y', played: 2, won: 0, lost: 2, points: 2 }] },
+      { sport: 'golf', name: 'Falsch', rows: [{ team: 'Q' }] },
+      { sport: 'futbol', name: 'Leer', rows: [] },
+      { sport: 'futbol', name: 'OhneTeam', rows: [{ played: 1 }] },
+    ] }));
+    assert.strictEqual(r.tables.length, 1);
+    assert.strictEqual(r.errors.length, 3);
+    assert.deepStrictEqual(r.tables[0].rows.map((x) => x.rank), [1, 2]);
+    assert.strictEqual(r.tables[0].rows[0].gd, 20);
+    assert.strictEqual(r.tables[0].rows[1].gd, null);
+    assert.strictEqual(r.tables[0].goalsLabel, 'Punkte');
+    assert.deepStrictEqual(live.parseStandingsText('').tables, []);
+    assert.strictEqual(live.parseStandingsText('{kaputt').errors.length, 1);
+    const ex = live.parseStandingsText(fs.readFileSync(path.join(__dirname, '..', 'standings.example.json'), 'utf8'));
+    assert.deepStrictEqual(ex.errors, []);
+    assert.strictEqual(ex.tables.length, 2);
+  });
+
+  await test('Spiele zusammenführen: Live-Stand gewinnt, Sender und Ort aus eigener Datei, keine Doppelten', () => {
+    const now = Date.parse('2026-11-08T17:30:00Z');
+    const fxText = JSON.stringify({ fixtures: [
+      { sport: 'futbol', competition: 'Trendyol Süper Lig', home: 'Fenerbahçe', away: 'Çaykur Rizespor', date: '2026-11-08T20:00:00+03:00', venue: 'Eigener Ort', tv: 'beIN Sports 1' },
+      { sport: 'basketbol', competition: 'EuroLeague', home: 'Fenerbahçe Beko', away: 'Baskonia', date: '2026-11-12T20:00:00+03:00' },
+      { sport: 'voleybol', competition: 'Sultanlar Ligi', home: 'Fenerbahçe Opet', away: 'Eczacıbaşı', date: '2026-11-03T18:00:00+03:00', homeScore: 3, awayScore: 2 },
+    ] });
+    const liveResult = { tables: [], matches: live.parseEspnScoreboard({ events: [
+      espnEvent('1', '2026-11-08T17:00Z', 'in', 1, 0),
+      espnEvent('3', '2026-11-29T17:00Z', 'pre', 0, 0),
+      espnEvent('2', '2026-11-01T17:00Z', 'post', 3, 1),
+    ] }, { team: 'fenerbahce', sport: 'futbol', competition: 'Trendyol Süper Lig' }) };
+    const v = live.buildView({ fixturesText: fxText, standingsText: '', tvText: TV_TEXT }, liveResult, now);
+    assert.deepStrictEqual(v.errors, []);
+    assert.strictEqual(v.matches.live.length, 1, 'Spiel aus Datei und ESPN ist dasselbe Spiel');
+    const l = v.matches.live[0];
+    assert.strictEqual(l.homeScore, 1);
+    assert.strictEqual(l.clock, "67'");
+    assert.strictEqual(l.venue, 'Eigener Ort');
+    assert.deepStrictEqual(l.tvChannels.map((c) => c.name), ['beIN Sports 1'], 'eigene Sender-Angabe gewinnt');
+    assert.deepStrictEqual(v.matches.upcoming.map((m) => m.away), ['Baskonia', 'Rizespor']);
+    assert.deepStrictEqual(v.matches.upcoming[0].tvChannels.map((c) => c.name), ['S Sport', 'S Sport Plus']);
+    assert.deepStrictEqual(v.matches.upcoming[1].tvChannels.map((c) => c.name), ['beIN Sports']);
+    assert.deepStrictEqual(v.matches.results.map((m) => m.home + ':' + m.homeScore), ['Fenerbahçe Opet:3', 'Fenerbahce:3'], 'neuestes Ergebnis zuerst');
+    assert.deepStrictEqual(v.matches.results[0].tvChannels.map((c) => c.name), ['TVF Voleybol TV (YouTube)']);
+  });
+
+  await test('buildView: Live-Tabelle hat Vorrang, eigene Tabelle springt ein, Sortierung nach Sportart', () => {
+    const standings = JSON.stringify({ tables: [
+      { id: 'tr-superlig', sport: 'futbol', name: 'Eigene Süper Lig', rows: [{ team: 'Alt' }] },
+      { id: 'euroleague', sport: 'basketbol', name: 'EuroLeague', rows: [{ team: 'Fenerbahçe Beko', played: 1, won: 1, lost: 0, points: 2 }] },
+    ] });
+    const liveTables = [{ id: 'tr-superlig', sport: 'futbol', name: 'Trendyol Süper Lig', goalsLabel: 'Tore', rows: live.parseEspnStandings(ESPN_STANDINGS), source: 'live', stale: false }];
+    const v = live.buildView({ fixturesText: '', standingsText: standings, tvText: '' }, { tables: liveTables, matches: [] });
+    assert.deepStrictEqual(v.tables.map((t) => t.name), ['Trendyol Süper Lig', 'EuroLeague']);
+    assert.strictEqual(v.tables[0].source, 'live');
+    const down = live.buildView({ fixturesText: '', standingsText: standings, tvText: '' }, { tables: [], matches: [] });
+    assert.deepStrictEqual(down.tables.map((t) => t.name), ['Eigene Süper Lig', 'EuroLeague']);
+  });
+
+  await test('loadLive: Rückfall auf zweite Quelle, Ausfall behält alte Daten (stale), Status je Abruf', async () => {
+    let failEspn = false;
+    const { srv, port } = await serve((req, res) => {
+      const ok = (obj) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (req.url.startsWith('/espn/apis/v2/sports/soccer/tur.1/standings')) { if (failEspn) { res.writeHead(503); return res.end('x'); } return ok(ESPN_STANDINGS); }
+      if (req.url.startsWith('/espn/apis/site/v2/sports/soccer/tur.1/scoreboard')) {
+        assert.match(req.url, /dates=\d{8}-\d{8}/);
+        if (failEspn) { res.writeHead(503); return res.end('x'); }
+        return ok({ events: [espnEvent('1', '2026-11-08T17:00Z', 'in', 2, 1)] });
+      }
+      if (req.url.startsWith('/sdb/lookuptable.php')) { assert.match(req.url, /l=4339&s=2026-2027/); return ok({ table: [{ intRank: '1', strTeam: 'Aus TheSportsDB', intPoints: '9' }] }); }
+      res.writeHead(404); res.end();
+    });
+    try {
+      const b = `http://127.0.0.1:${port}`;
+      const cfg = {
+        tables: [{ id: 't', sport: 'futbol', name: 'Liga', sources: [{ type: 'espn', league: 'tur.1', baseUrl: b + '/espn' }, { type: 'thesportsdb', league: '4339', season: '2026-2027', baseUrl: b + '/sdb' }] }],
+        matches: [{ id: 'm', type: 'espn', league: 'tur.1', team: 'fenerbahce', sport: 'futbol', competition: 'Liga', baseUrl: b + '/espn' }],
+      };
+      const first = await live.loadLive(cfg, { getText }, null);
+      assert.strictEqual(first.tables[0].sourceName, 'ESPN');
+      assert.strictEqual(first.tables[0].rows[0].team, 'Fenerbahce');
+      assert.strictEqual(first.matches.length, 1);
+      assert.strictEqual(first.matches[0].status, 'live');
+      assert.ok(first.status.every((s) => s.ok));
+
+      failEspn = true;
+      const second = await live.loadLive(cfg, { getText }, first);
+      assert.strictEqual(second.tables[0].sourceName, 'TheSportsDB', 'zweite Quelle springt ein');
+      assert.strictEqual(second.tables[0].rows[0].team, 'Aus TheSportsDB');
+      assert.strictEqual(second.matches.length, 1, 'alte Spiele bleiben erhalten');
+      const bad = second.status.filter((s) => !s.ok);
+      assert.strictEqual(bad.length, 2);
+      assert.match(bad[0].error, /HTTP 503/);
+
+      const none = await live.loadLive({ tables: [{ id: 'z', sport: 'futbol', name: 'Z', sources: [{ type: 'espn', league: 'tur.1', baseUrl: b + '/espn' }] }] }, { getText }, null);
+      assert.deepStrictEqual(none.tables, [], 'ohne Daten und ohne Altbestand keine Tabelle');
+      const stale = await live.loadLive({ tables: [{ id: 't', sport: 'futbol', name: 'Liga', sources: [{ type: 'espn', league: 'tur.1', baseUrl: b + '/espn' }] }] }, { getText }, first);
+      assert.strictEqual(stale.tables[0].stale, true, 'Ausfall: letzte Daten, als veraltet markiert');
+      assert.strictEqual(stale.tables[0].rows[0].team, 'Fenerbahce');
+    } finally { srv.close(); }
+  });
+
   console.log(`\n${passed} Tests bestanden`);
 })();

@@ -1,5 +1,5 @@
 {
-  "_hinweis": "Platzhalter-Beispiel. Echte Spiele in fixtures.json eintragen. Ohne Ergebnis = anstehend, mit homeScore/awayScore = Ergebnis. sport: futbol | basketbol | voleybol | diger. Datum mit Zeitzone, z. B. +03:00.",
+  "_hinweis": "Platzhalter-Beispiel. Echte Spiele in fixtures.json eintragen. Ohne Ergebnis = anstehend, mit homeScore/awayScore = Ergebnis. sport: futbol | basketbol | voleybol | diger. Datum mit Zeitzone, z. B. +03:00. Optional: \"tv\": \"beIN Sports\" (oder Liste) überschreibt den Sender, der sonst aus tv.json nach Wettbewerb kommt.",
   "fixtures": [
     {
       "sport": "futbol",
@@ -7,7 +7,8 @@
       "home": "Fenerbahçe",
       "away": "Gegner A",
       "date": "2030-01-01T18:00:00+03:00",
-      "venue": "Beispiel-Stadion"
+      "venue": "Beispiel-Stadion",
+      "tv": "beIN Sports"
     },
     {
       "sport": "basketbol",

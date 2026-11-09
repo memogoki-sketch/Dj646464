@@ -36,6 +36,14 @@
         <button id="refresh" type="button" class="btn" title="Quellen neu laden">Aktualisieren</button>
       </div>
     </div>
+    <div class="bar modes-bar">
+      <nav id="modes" class="modes" aria-label="Bereich">
+        <button type="button" class="mode" data-mode="news" aria-pressed="true">📰 Nachrichten</button>
+        <button type="button" class="mode" data-mode="table" aria-pressed="false">📊 Tabelle</button>
+        <button type="button" class="mode" data-mode="matches" aria-pressed="false">📅 Spiele<i class="live-dot" aria-hidden="true"></i></button>
+        <button type="button" class="mode" data-mode="tv" aria-pressed="false">📺 TV-Sender</button>
+      </nav>
+    </div>
     <div class="bar controls">
       <nav id="tabs" class="tabs" aria-label="Sportarten"></nav>
       <div class="tools">
@@ -61,6 +69,9 @@
       <div class="fx-col"><h3>Nächste Spiele</h3><ul id="fx-upcoming"></ul></div>
       <div class="fx-col"><h3>Letzte Ergebnisse</h3><ul id="fx-results"></ul></div>
     </section>
+    <section id="panel-table" class="panel" hidden aria-label="Tabelle"></section>
+    <section id="panel-matches" class="panel" hidden aria-label="Spiele"></section>
+    <section id="panel-tv" class="panel" hidden aria-label="TV-Sender"></section>
     <section id="hero" class="hero" hidden aria-label="Top-Meldungen"></section>
     <section id="grid" class="grid" aria-live="polite"></section>
     <section id="gallery" class="gallery" hidden aria-label="Bilder"></section>
@@ -102,6 +113,7 @@
   <script src="shared/classify.js"></script>
   <script src="shared/fixtures.js"></script>
   <script src="shared/engine.js"></script>
+  <script src="shared/live.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

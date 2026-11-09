@@ -1,0 +1,28 @@
+{
+  "_hinweis": "Platzhalter-Beispiel. Echte Tabellen in standings.json eintragen. Jede Tabelle braucht id, sport (futbol|basketbol|voleybol|diger), name und rows. Fehlen Plätze, gilt die Reihenfolge der Zeilen. Spalten ohne Daten werden ausgeblendet. goalsLabel benennt die Spalte gf:ga (Tore, Punkte, Sätze).",
+  "tables": [
+    {
+      "id": "euroleague",
+      "sport": "basketbol",
+      "name": "EuroLeague (Beispiel)",
+      "goalsLabel": "Punkte",
+      "updatedAt": "2030-01-01",
+      "source": "eigene Pflege",
+      "rows": [
+        { "team": "Fenerbahçe Beko", "played": 10, "won": 7, "lost": 3, "gf": 800, "ga": 760, "points": 17 },
+        { "team": "Team B", "played": 10, "won": 6, "lost": 4, "gf": 780, "ga": 770, "points": 16 },
+        { "team": "Team C", "played": 10, "won": 4, "lost": 6, "gf": 750, "ga": 790, "points": 14 }
+      ]
+    },
+    {
+      "id": "sultanlar",
+      "sport": "voleybol",
+      "name": "Sultanlar Ligi (Beispiel)",
+      "goalsLabel": "Sätze",
+      "rows": [
+        { "team": "Fenerbahçe Opet", "played": 5, "won": 5, "lost": 0, "gf": 15, "ga": 2, "points": 14 },
+        { "team": "Team B", "played": 5, "won": 3, "lost": 2, "gf": 11, "ga": 9, "points": 9 }
+      ]
+    }
+  ]
+}

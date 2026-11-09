@@ -1,15 +1,15 @@
 Ergebnis: success
 --- Ende des Logs:
+> Task :app:compressDebugAssets
 > Task :app:desugarDebugFileDependencies
 > Task :app:processDebugJavaRes NO-SOURCE
-> Task :app:compressDebugAssets
 > Task :app:checkDebugDuplicateClasses
 > Task :app:mergeDebugJniLibFolders
-> Task :app:mergeDebugJavaResource
 > Task :app:mergeExtDexDebug
-> Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:mergeLibDexDebug
+> Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:stripDebugDebugSymbols NO-SOURCE
+> Task :app:mergeDebugJavaResource
 > Task :app:processDebugResources
 > Task :app:validateSigningDebug
 > Task :app:compileDebugJavaWithJavac
@@ -21,7 +21,7 @@ Ergebnis: success
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1793309900457.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1794206143683.json
 
-BUILD SUCCESSFUL in 37s
+BUILD SUCCESSFUL in 39s
 32 actionable tasks: 32 executed

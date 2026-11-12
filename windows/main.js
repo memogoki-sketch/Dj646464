@@ -132,8 +132,9 @@ function parseEpg(xml, now) {
 
 // ---------------------------------------------------------------- IPC
 
-function cachePath() {
-  return path.join(app.getPath('userData'), 'playlist.m3u');
+function cachePath(id) {
+  const n = Number(id) || 0;
+  return path.join(app.getPath('userData'), n ? `playlist_${n}.m3u` : 'playlist.m3u');
 }
 
 ipcMain.handle('fetch-text', async (_e, url) => {
@@ -152,24 +153,32 @@ ipcMain.handle('epg-load', async (_e, url) => {
   return parseEpg(buf.toString('utf8'), Date.now());
 });
 
-ipcMain.handle('cache-read', async () => {
+ipcMain.handle('cache-read', async (_e, id) => {
   try {
-    return fs.readFileSync(cachePath(), 'utf8');
+    return fs.readFileSync(cachePath(id), 'utf8');
   } catch (e) {
     return '';
   }
 });
-ipcMain.handle('cache-write', async (_e, text) => {
+ipcMain.handle('cache-write', async (_e, text, id) => {
   try {
-    fs.writeFileSync(cachePath(), text, 'utf8');
+    fs.writeFileSync(cachePath(id), text, 'utf8');
   } catch (e) {
     /* egal */
   }
   return true;
 });
-ipcMain.handle('cache-clear', async () => {
+ipcMain.handle('cache-delete', async (_e, id) => {
   try {
-    fs.unlinkSync(cachePath());
+    fs.unlinkSync(cachePath(id));
+  } catch (e) {
+    /* egal */
+  }
+  return true;
+});
+ipcMain.handle('cache-clear', async (_e, id) => {
+  try {
+    fs.unlinkSync(cachePath(id));
   } catch (e) {
     /* egal */
   }

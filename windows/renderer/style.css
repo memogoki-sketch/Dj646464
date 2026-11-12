@@ -200,3 +200,10 @@ body[data-anim="2"] .tile:hover, body[data-anim="2"] .tile:focus-visible, body[d
 
 #p-list[data-msg]::after { content: attr(data-msg); position: absolute; left: 0; right: 0; top: 40%; text-align: center; font-size: 1.15rem; color: var(--text-dim); padding: 0 1.5rem; pointer-events: none; }
 .panel.vlist { position: relative; inset: auto; }
+
+/* ---------- Profile, Pause ---------- */
+.pchip { background: rgba(255,255,255,.12); border: .1rem solid rgba(255,255,255,.2); color: var(--text); border-radius: 2rem; padding: .35rem .9rem; font: inherit; font-size: .95rem; cursor: pointer; outline: none; }
+.pchip:hover, .pchip:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 .12rem var(--accent); }
+#pause-ico { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%); font-size: 5rem; background: rgba(0,0,0,.55); width: 8rem; height: 8rem; border-radius: 50%; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+#pause-ico.hidden { display: none; }
+#player:not(.full) #pause-ico { display: none; }

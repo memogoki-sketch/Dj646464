@@ -16,10 +16,17 @@ const errMsg = (e) => String((e && e.message) || e).replace(/^Error invoking rem
 
 /* ---------------- Einstellungen (localStorage) ---------------- */
 
+// Profile (Kunden): diese Schlüssel gelten je Profil (Profil 0 ohne Präfix, sonst p<id>_).
+const PK = new Set(['url', 'server', 'user', 'pass', 'epg', 'fav', 'hidden', 'recent', 'last', 'resume']);
+let PID = (() => {
+  try { return Number(JSON.parse(localStorage.getItem('dj64.profile'))) || 0; } catch (e) { return 0; }
+})();
+const pk = (k) => (PID && PK.has(k) ? 'p' + PID + '_' + k : k);
+
 const S = {
   get(k, d) {
     try {
-      const v = localStorage.getItem('dj64.' + k);
+      const v = localStorage.getItem('dj64.' + pk(k));
       return v === null ? d : JSON.parse(v);
     } catch (e) {
       return d;
@@ -27,12 +34,12 @@ const S = {
   },
   set(k, v) {
     try {
-      localStorage.setItem('dj64.' + k, JSON.stringify(v));
+      localStorage.setItem('dj64.' + pk(k), JSON.stringify(v));
     } catch (e) { /* voll oder gesperrt */ }
   },
   del(k) {
     try {
-      localStorage.removeItem('dj64.' + k);
+      localStorage.removeItem('dj64.' + pk(k));
     } catch (e) { /* egal */ }
   }
 };
@@ -549,6 +556,7 @@ function upcoming(ch, now, n) {
 const hm = (ms) => new Date(ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 
 async function loadEpg(verbose) {
+  const pid = PID;
   const url = epgUrl();
   if (!url) {
     state.epg = null;
@@ -557,7 +565,9 @@ async function loadEpg(verbose) {
   }
   if (verbose) toast('EPG wird geladen …', 0);
   try {
-    state.epg = await window.api.loadEpg(url);
+    const res = await window.api.loadEpg(url);
+    if (pid !== PID) return;
+    state.epg = res;
     const n = Object.keys(state.epg.channels).length;
     toast(`EPG geladen: ${n} Sender`, 2500);
     if (state.screen === 'browse') {
@@ -875,6 +885,173 @@ function startIntro(done, force) {
   });
 }
 
+/* ---------------- Profile (Kunden) ---------------- */
+
+const profileList = () => {
+  const l = S.get('profiles', null);
+  return Array.isArray(l) && l.length ? l : [{ id: 0, name: 'Standard' }];
+};
+const profileName = () => (profileList().find((p) => p.id === PID) || { name: 'Standard' }).name;
+let profileBusy = 0;
+
+async function switchProfile(id) {
+  if (id === PID) return;
+  saveResume();
+  PID = id;
+  localStorage.setItem('dj64.profile', JSON.stringify(id));
+  favCache = null;
+  state.epg = null;
+  state.folder = null;
+  state.query = '';
+  stopStream();
+  setPlaylist({ channels: [], epg: '' });
+  renderHome();
+  const my = ++profileBusy;
+  try {
+    const cached = await window.api.cacheRead(id);
+    if (my === profileBusy && cached) {
+      setPlaylist(parseM3u(cached));
+      if (state.screen === 'home') renderHome();
+    }
+  } catch (e) { /* kein Cache */ }
+  if (my !== profileBusy) return;
+  toast('Profil: ' + profileName(), 2000);
+  if (playlistUrl()) refreshPlaylist();
+  else showAccount();
+}
+
+function promptName(title, value, cb) {
+  const body = el('div');
+  body.innerHTML = `<label>Name (z. B. Kunde)</label><input type="text" id="f-pname" value="${esc(value)}" maxlength="40">`;
+  openModal({
+    title,
+    body,
+    buttons: [{ label: 'Abbrechen' }, {
+      label: 'OK', primary: true,
+      onClick: (m) => {
+        const v = $('#f-pname', m).value.trim();
+        if (!v) return false;
+        cb(v);
+      }
+    }]
+  });
+}
+
+function showProfiles() {
+  menuDialog('Profile (Kunden)', () => {
+    const rows = profileList().map((p) => ({
+      label: (p.id === PID ? '● ' : '○ ') + p.name,
+      value: p.id === PID ? 'aktiv' : '',
+      pick: () => { switchProfile(p.id); }
+    }));
+    rows.push({
+      label: '＋ Neues Profil', value: '',
+      pick: () => promptName('Neues Profil', '', (name) => {
+        const l = profileList();
+        const id = Math.max(...l.map((p) => p.id)) + 1;
+        l.push({ id, name });
+        S.set('profiles', l);
+        switchProfile(id);
+      })
+    });
+    rows.push({ label: 'Zugangsdaten bearbeiten', value: profileName(), pick: () => showAccount() });
+    rows.push({
+      label: 'Umbenennen', value: '',
+      pick: () => promptName('Profil umbenennen', profileName(), (name) => {
+        S.set('profiles', profileList().map((p) => (p.id === PID ? { id: p.id, name } : p)));
+        if (state.screen === 'home') renderHome(); else if (state.screen === 'settings') renderSettings();
+        showProfiles();
+      })
+    });
+    rows.push({
+      label: 'Aktives Profil löschen', value: '',
+      pick: () => {
+        const l = profileList();
+        if (l.length < 2) { toast('Das letzte Profil kann nicht gelöscht werden', 3000); return; }
+        openModal({
+          title: 'Profil löschen?',
+          body: `Profil „${esc(profileName())}“ mit Zugangsdaten, Favoriten und Zwischenspeicher wirklich löschen?`,
+          buttons: [{ label: 'Abbrechen' }, {
+            label: 'Löschen', primary: true,
+            onClick: async () => {
+              const id = PID;
+              const rest = l.filter((p) => p.id !== id);
+              S.set('profiles', rest);
+              await switchProfile(rest[0].id);
+              const pre = id ? `dj64.p${id}_` : 'dj64.';
+              for (const k of PK) { try { localStorage.removeItem(pre + k); } catch (e) { /* egal */ } }
+              try { await window.api.cacheDelete(id); } catch (e) { /* egal */ }
+            }
+          }]
+        });
+      }
+    });
+    return rows;
+  });
+}
+
+/* ---------------- Film- & Serien-Wiedergabe ---------------- */
+
+const SEEK_CHOICES = [5, 10, 15, 30, 60, 120, 300, 600];
+const seekName = (s) => (s < 60 ? s + ' Sekunden' : s / 60 + (s === 60 ? ' Minute' : ' Minuten'));
+const seekBack = () => S.get('seekB', S.get('seek', 10));
+const seekFwd = () => S.get('seekF', S.get('seek', 10));
+const RESUME_NAMES = ['Automatisch fortsetzen', 'Nachfragen', 'Aus'];
+
+function showVodSettings() {
+  menuDialog('Film- & Serien-Wiedergabe', () => [
+    { label: 'Zurückspulen (Pfeil links)', value: seekName(seekBack()), pick: (back) => pickDialog('Zurückspulen', SEEK_CHOICES.map(seekName), SEEK_CHOICES.indexOf(seekBack()), (k) => S.set('seekB', SEEK_CHOICES[k]), back) },
+    { label: 'Vorspulen (Pfeil rechts)', value: seekName(seekFwd()), pick: (back) => pickDialog('Vorspulen', SEEK_CHOICES.map(seekName), SEEK_CHOICES.indexOf(seekFwd()), (k) => S.set('seekF', SEEK_CHOICES[k]), back) },
+    { label: 'Schneller spulen beim Gedrückthalten', value: onOff(S.get('seekAccel', true)), pick: (back) => { S.set('seekAccel', !S.get('seekAccel', true)); back(); } },
+    { label: 'Wiedergabe fortsetzen', value: RESUME_NAMES[S.get('resumeMode', 1)], pick: (back) => pickDialog('Wiedergabe fortsetzen', RESUME_NAMES, S.get('resumeMode', 1), (k) => S.set('resumeMode', k), back) },
+    { label: 'Gemerkte Positionen löschen', value: Object.keys(S.get('resume', {})).length + ' gemerkt', pick: (back) => { S.del('resume'); toast('Positionen gelöscht', 2000); back(); } }
+  ]);
+}
+
+// Fortsetzen: Position je Adresse merken
+function saveResume() {
+  const ch = cur;
+  if (!ch || ch.kind === 'live') return;
+  const d = video.duration;
+  const t = video.currentTime;
+  if (!isFinite(d) || d <= 0 || !isFinite(t) || t < 1) return;
+  const r = S.get('resume', {});
+  if (d - t < 60 || t / d > 0.95) delete r[ch.url];
+  else r[ch.url] = [Math.floor(t), Math.floor(d), Date.now()];
+  const keys = Object.keys(r);
+  if (keys.length > 200) {
+    keys.sort((a, b) => r[a][2] - r[b][2]);
+    keys.slice(0, keys.length - 200).forEach((k) => delete r[k]);
+  }
+  S.set('resume', r);
+}
+
+let pendingResume = null;
+function applyResume() {
+  const pr = pendingResume;
+  pendingResume = null;
+  if (!pr || !cur || cur.kind === 'live' || !isFinite(video.duration)) return;
+  const goTo = (p) => { video.currentTime = Math.min(p, video.duration - 1); osd('▶ Weiter bei ' + mmss(p), 2500); };
+  if (pr.force || S.get('resumeMode', 1) === 0) { goTo(pr.pos); return; }
+  video.pause();
+  let decided = false;
+  const url = cur.url;
+  const finish = (yes) => {
+    if (decided) return;
+    decided = true;
+    if (!cur || cur.url !== url) return;
+    if (yes) goTo(pr.pos);
+    else { const r = S.get('resume', {}); delete r[url]; S.set('resume', r); }
+    video.play().catch(() => {});
+  };
+  openModal({
+    title: 'Fortsetzen?',
+    body: `Fortsetzen ab ${mmss(pr.pos)}?`,
+    onClose: () => finish(false),
+    buttons: [{ label: 'Von vorn', onClick: () => finish(false) }, { label: 'Fortsetzen', primary: true, onClick: () => finish(true) }]
+  });
+}
+
 /* ---------------- Hinweise ---------------- */
 
 let toastTimer = 0;
@@ -920,7 +1097,7 @@ function applyLook() {
 
 let modals = [];
 
-function openModal({ title, body, buttons }) {
+function openModal({ title, body, buttons, onClose }) {
   const bg = el('div', 'modal-bg');
   const m = el('div', 'modal');
   m.appendChild(el('h2', '', esc(title)));
@@ -933,9 +1110,12 @@ function openModal({ title, body, buttons }) {
     bg,
     m,
     close() {
+      if (api.closed) return;
+      api.closed = true;
       bg.remove();
       modals = modals.filter((x) => x !== api);
       focusHome();
+      if (onClose) onClose();
     }
   };
   let primaryBtn = null;
@@ -1157,9 +1337,10 @@ function renderHome() {
   $('#home').innerHTML = `
     <div class="topbar">
       <div class="grow"><div id="clock"></div><div id="date"></div></div>
+      <button class="pchip" data-act="profile" title="Profile (Kunden)">● ${esc(profileName())}</button>
       ${ibtn('search', 'search', 'Suchen (Strg+F)')}
       ${ibtn('heart', 'favs', 'Favoriten')}
-      ${ibtn('user', 'account', 'Zugangsdaten')}
+      ${ibtn('user', 'profile', 'Profile (Kunden)')}
       ${ibtn('refresh', 'refresh', 'Playlist aktualisieren')}
       ${ibtn('fullscreen', 'winfull', 'Vollbild (F11)')}
     </div>
@@ -1488,11 +1669,13 @@ function renderSettings() {
   $('#settings').innerHTML = `
     <div class="head"><h1>Einstellungen</h1>${ibtn('fullscreen', 'winfull', 'Vollbild (F11)')}${ibtn('home', 'home', 'Startseite (Esc)')}</div>
     <div class="settings-grid">
+      ${t('user', 'Profile (Kunden)', profileName(), 'profile')}
       ${t('user', 'Zugangsdaten', usesXtream() ? 'Xtream' : 'M3U-Wiedergabeliste', 'account')}
       ${t('refresh', 'Playlist aktualisieren', '', 'refresh')}
       ${t('folder', 'Kategorien verwalten', 'Ausblenden und einblenden', 'cats')}
       ${t('calendar', 'Programmführer (EPG)', state.epg ? Object.keys(state.epg.channels).length + ' Sender' : 'nicht geladen', 'epg')}
-      ${t('tune', 'Player', 'Spulen · Ton · Format', 'player')}
+      ${t('tune', 'Player', 'Ton · Format', 'player')}
+      ${t('play', 'Film- & Serien-Wiedergabe', 'Spulen · Pause · Fortsetzen', 'vod')}
       ${t('text', 'Darstellung', 'Größe · Schrift · Farbe', 'look')}
       ${t('image', 'Hintergrundbild', '', 'bg')}
       ${t('tune', 'Leistung', 'Puffer · Vorschau · Animation', 'perf')}
@@ -1502,7 +1685,7 @@ function renderSettings() {
       ${t('lock', 'Jugendschutz', parentalOn() ? 'PIN aktiv' : 'Aus', 'parental')}
       ${t('folder', 'Sortierung', sortMode() === 1 ? 'A–Z, Serien als Ordner' : 'Original', 'sortset')}
       ${t('trash', 'Cache leeren', '', 'cache')}
-      ${t('info', 'Info und Tasten', 'Version 1.2', 'info')}
+      ${t('info', 'Info und Tasten', 'Version 1.3', 'info')}
     </div>`;
   const f = $('#settings [data-act="account"]');
   if (f && !modals.length) f.focus();
@@ -1567,25 +1750,12 @@ function showEpgDialog() {
 }
 
 function showPlayerSettings() {
-  const labels = () => [
-    `Vor-/Zurückspulen: ${S.get('seek', 10)} Sekunden`,
-    `Standard-Lautstärke: ${S.get('volume', 100)} %`,
-    `Bildschirmformat: ${RESIZES[S.get('resize', 0)]}`
-  ];
-  const body = el('div');
-  labels().forEach((l, i) => {
-    const b = el('button', 'opt', esc(l));
-    b.addEventListener('click', () => {
-      api.close();
-      if (i === 0) chooseDialog('Spulschritt', SEEKS.map((s) => s + ' Sekunden'), SEEKS.indexOf(S.get('seek', 10)), (k) => { S.set('seek', SEEKS[k]); showPlayerSettings(); });
-      else if (i === 1) {
-        const vols = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10];
-        chooseDialog('Standard-Lautstärke', vols.map((v) => v + ' %'), vols.indexOf(S.get('volume', 100)), (k) => { S.set('volume', vols[k]); $('#video').volume = vols[k] / 100; showPlayerSettings(); });
-      } else chooseDialog('Bildschirmformat', RESIZES, S.get('resize', 0), (k) => { S.set('resize', k); applyLook(); showPlayerSettings(); });
-    });
-    body.appendChild(b);
-  });
-  const api = openModal({ title: 'Player', body, buttons: [{ label: 'Schließen' }] });
+  const vols = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10];
+  menuDialog('Player', () => [
+    { label: 'Film- & Serien-Wiedergabe', value: 'Spulen · Fortsetzen', pick: () => showVodSettings() },
+    { label: 'Standard-Lautstärke', value: S.get('volume', 100) + ' %', pick: (back) => pickDialog('Standard-Lautstärke', vols.map((v) => v + ' %'), vols.indexOf(S.get('volume', 100)), (k) => { S.set('volume', vols[k]); $('#video').volume = vols[k] / 100; }, back) },
+    { label: 'Bildschirmformat', value: RESIZES[S.get('resize', 0)], pick: (back) => pickDialog('Bildschirmformat', RESIZES, S.get('resize', 0), (k) => { S.set('resize', k); applyLook(); }, back) }
+  ]);
 }
 
 function showLook() {
@@ -1688,7 +1858,7 @@ function showInfo() {
   let host = '';
   try { host = new URL(playlistUrl()).host; } catch (e) { host = ''; }
   openModal({
-    title: 'DJ64 für Windows 1.2',
+    title: 'DJ64 für Windows 1.3',
     body: `<div>Live-TV: ${n.live} &nbsp; Filme: ${n.movie} &nbsp; Serien: ${n.series}<br>Favoriten: ${favSet().size}<br>Quelle: ${usesXtream() ? 'Xtream: ' + esc(host) + ' (Benutzer ' + esc(S.get('user', '')) + ')' : host ? 'M3U: ' + esc(host) : '(keine)'}</div>
     <div class="small" style="margin-top:1rem;line-height:1.7">
       <b>In der Liste</b><br>
@@ -1707,17 +1877,20 @@ function showInfo() {
 async function refreshPlaylist() {
   const url = playlistUrl();
   if (!url) { showAccount(); return; }
+  const pid = PID;
   toast('Playlist wird geladen …', 0);
   try {
     const text = await window.api.fetchText(url);
     const pl = parseM3u(text);
     if (!pl.channels.length) throw new Error('Keine Einträge in der Playlist gefunden');
-    await window.api.cacheWrite(text);
+    await window.api.cacheWrite(text, pid);
+    if (pid !== PID) return;
     setPlaylist(pl);
     toast(`${pl.channels.length} Einträge geladen`, 2500);
     if (state.screen !== 'browse' || !state.items.length) rerender();
     if (S.get('epgauto', true)) loadEpg(false);
   } catch (e) {
+    if (pid !== PID) return;
     toast('Playlist-Fehler: ' + errMsg(e) + (state.channels.length ? ' (gespeicherte Liste bleibt aktiv)' : ''), 6000);
   }
 }
@@ -1772,9 +1945,15 @@ function osd(text, ms = 2000) {
 
 function startStream(ch) {
   if (cur && cur.url === ch.url && (mp || hls || video.src)) { placePlayer(); return; }
+  saveResume();
   cur = ch;
   retries = 0;
   bufBoost = 0;
+  pendingResume = null;
+  if (ch.kind !== 'live' && S.get('resumeMode', 1) !== 2) {
+    const e = S.get('resume', {})[ch.url];
+    if (e && e[0] > 10) pendingResume = { pos: e[0], force: false };
+  }
   loadToken++;
   clearTimeout(retryTimer);
   engineOrder = engineOrderFor(ch);
@@ -1831,6 +2010,7 @@ function tryEngine(i, token) {
 
 function scheduleRetry(token) {
   if (token !== loadToken) return;
+  if (cur && cur.kind !== 'live' && isFinite(video.currentTime) && video.currentTime > 5) pendingResume = { pos: video.currentTime, force: true };
   destroyEngine();
   if (retries < maxRetries()) {
     retries++;
@@ -1847,10 +2027,13 @@ function scheduleRetry(token) {
 
 video.addEventListener('playing', () => {
   clearStall();
+  const first = !playedOnce;
   playedOnce = true;
+  if (first && pendingResume) applyResume();
   retries = 0;
   clearTimeout(watchdog);
-  if (state.full) showNowInfo(); else osd(null);
+  // Nach Spulen/Pufferung nur Lade-Hinweise entfernen, Spul-Rückmeldung bleibt stehen.
+  if (first || (Date.now() - lastSeekAt > 2000 && /Puffer|Lade|Verbindung/.test($('#osd').textContent))) { if (state.full) showNowInfo(); else osd(null); }
 });
 let stallTimer = 0;
 let slowTimer = 0;
@@ -1860,7 +2043,7 @@ function clearStall() {
 }
 video.addEventListener('waiting', () => {
   if (!playedOnce) return;
-  osd('Puffer füllt sich …', 0);
+  if (Date.now() - lastSeekAt > 2000) osd('Puffer füllt sich …', 0);
   clearStall();
   // Bei wiederholtem Stocken den Puffer automatisch eine Stufe vergrößern.
   slowTimer = setTimeout(() => {
@@ -1880,8 +2063,18 @@ video.addEventListener('timeupdate', updateSeekBar);
 video.addEventListener('durationchange', updateSeekBar);
 video.addEventListener('play', syncPlayBtn);
 video.addEventListener('pause', syncPlayBtn);
+function syncPauseUi() {
+  const live = cur && cur.kind === 'live';
+  $('#pause-ico').classList.toggle('hidden', !(state.full && video.paused && !live && playedOnce));
+}
+video.addEventListener('pause', () => { syncPauseUi(); if (state.full) showControls(); saveResume(); });
+video.addEventListener('play', syncPauseUi);
+setInterval(() => { if (!video.paused) saveResume(); }, 10000);
+window.addEventListener('beforeunload', saveResume);
+window.addEventListener('pagehide', saveResume);
 
 function stopStream() {
+  saveResume();
   loadToken++;
   clearTimeout(retryTimer);
   clearTimeout(previewTimer);
@@ -2019,14 +2212,13 @@ function buildControls() {
   ctlSubBase = sub;
   $('#ctl-sub').textContent = sub;
   const live = ch.kind === 'live';
-  const seek = S.get('seek', 10);
   const vol = Math.round(video.volume * 100);
   $('#ctl-buttons').innerHTML = `
     <button class="ibtn" data-ctl="back" title="Zurück zur Liste (Esc)">${ic('back')}</button>
     <button class="ibtn" data-ctl="prev" title="Voriger Sender">${ic('next', 'transform:scaleX(-1)')}</button>
-    ${live ? '' : `<button class="ibtn" data-ctl="rew" title="${seek} s zurück">${ic('replay')}</button>`}
+    ${live ? '' : `<button class="ibtn" data-ctl="rew" title="${seekBack()} s zurück">${ic('replay')}</button>`}
     <button class="ibtn" id="btn-play" data-ctl="play" title="Pause (Leertaste)">${ic(video.paused ? 'play' : 'pause')}</button>
-    ${live ? '' : `<button class="ibtn" data-ctl="fwd" title="${seek} s vor">${ic('replay', 'transform:scaleX(-1)')}</button>`}
+    ${live ? '' : `<button class="ibtn" data-ctl="fwd" title="${seekFwd()} s vor">${ic('replay', 'transform:scaleX(-1)')}</button>`}
     <button class="ibtn" data-ctl="next" title="Nächster Sender">${ic('next')}</button>
     <div class="grow"></div>
     <button class="ibtn" data-ctl="mute" title="Ton aus (M)">${ic(video.muted || vol === 0 ? 'mute' : 'volume')}</button>
@@ -2062,12 +2254,11 @@ function showControls() {
 }
 
 function ctlAction(a) {
-  const seek = S.get('seek', 10);
   if (a === 'back') exitFull();
   else if (a === 'prev') zap(-1);
   else if (a === 'next') zap(1);
-  else if (a === 'rew') seekBy(-seek);
-  else if (a === 'fwd') seekBy(seek);
+  else if (a === 'rew') seekBy(-seekBack());
+  else if (a === 'fwd') seekBy(seekFwd());
   else if (a === 'play') togglePause();
   else if (a === 'mute') toggleMute();
   else if (a === 'aspect') cycleAspect();
@@ -2075,14 +2266,18 @@ function ctlAction(a) {
   else if (a === 'win') window.api.toggleFullscreen();
 }
 
+let lastSeekAt = 0;
 function seekBy(s) {
   if (!isFinite(video.duration)) return;
+  lastSeekAt = Date.now();
   video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + s));
-  osd((s > 0 ? '⏩ +' : '⏪ ') + s + ' s', 1200);
+  osd(`${s > 0 ? '⏩ +' : '⏪ '}${s} s  ·  ${mmss(video.currentTime)} / ${mmss(video.duration)}`, 1500);
+  updateSeekBar();
 }
 function togglePause() {
   if (video.paused) video.play().catch(() => {}); else video.pause();
   osd(video.paused ? '⏸ Pause' : '▶ Weiter', 1200);
+  syncPauseUi();
 }
 function setVolume(v) {
   v = Math.max(0, Math.min(100, v));
@@ -2122,6 +2317,8 @@ document.addEventListener('click', (e) => {
     home: () => renderHome(),
     search: () => showSearch(),
     account: () => gate(() => showAccount()),
+    profile: () => gate(() => showProfiles()),
+    vod: () => showVodSettings(),
     refresh: () => refreshPlaylist(),
     winfull: () => window.api.toggleFullscreen(),
     cats: () => showCats(),
@@ -2129,7 +2326,7 @@ document.addEventListener('click', (e) => {
     player: () => showPlayerSettings(),
     look: () => showLook(),
     bg: () => showBgMenu(),
-    cache: async () => { await window.api.cacheClear(); toast('Cache geleert', 2000); if (playlistUrl()) refreshPlaylist(); },
+    cache: async () => { await window.api.cacheClear(PID); toast('Cache geleert', 2000); if (playlistUrl()) refreshPlaylist(); },
     info: () => showInfo(),
     weather: () => showWeather(),
     weatherset: () => showWeatherSettings(),
@@ -2151,8 +2348,14 @@ document.addEventListener('input', (e) => {
 });
 
 playerEl.addEventListener('mousemove', showControls);
-video.addEventListener('click', () => { if (state.full) { showControls(); } });
-video.addEventListener('dblclick', () => { if (state.full) window.api.toggleFullscreen(); else if (state.screen === 'browse') playFull(state.sel); });
+let clickTimer = 0;
+video.addEventListener('click', () => {
+  if (!state.full) return;
+  showControls();
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => { if (cur && cur.kind !== 'live') togglePause(); }, 230);
+});
+video.addEventListener('dblclick', () => { clearTimeout(clickTimer); if (state.full) window.api.toggleFullscreen(); else if (state.screen === 'browse') playFull(state.sel); });
 playerEl.addEventListener('wheel', (e) => {
   if (!state.full) return;
   setVolume(Math.round(video.volume * 100) + (e.deltaY < 0 ? 5 : -5));
@@ -2243,17 +2446,35 @@ function browseKey(e) {
   void list;
 }
 
+let holdStart = 0;
+let lastHold = 0;
+function holdSeek(e, dir) {
+  const base = dir > 0 ? seekFwd() : seekBack();
+  const now = Date.now();
+  let mult = 1;
+  if (!e.repeat) {
+    holdStart = now;
+  } else if (S.get('seekAccel', true)) {
+    if (now - lastHold < 280) return;
+    const dt = now - holdStart;
+    mult = dt > 3000 ? 8 : dt > 1800 ? 4 : dt > 800 ? 2 : 1;
+  } else {
+    return;
+  }
+  lastHold = now;
+  seekBy(dir * base * mult);
+}
+
 function fullKey(e) {
   const live = cur && cur.kind === 'live';
-  const seek = S.get('seek', 10);
   const k = e.key;
   if (k === 'Escape' || k === 'Backspace') { e.preventDefault(); exitFull(); return; }
   if (k === 'PageUp') { e.preventDefault(); zap(1); return; }
   if (k === 'PageDown') { e.preventDefault(); zap(-1); return; }
   if (k === 'ArrowUp') { e.preventDefault(); if (live) zap(1); else setVolume(Math.round(video.volume * 100) + 5); showControls(); return; }
   if (k === 'ArrowDown') { e.preventDefault(); if (live) zap(-1); else setVolume(Math.round(video.volume * 100) - 5); showControls(); return; }
-  if (k === 'ArrowLeft') { e.preventDefault(); if (!live) seekBy(-seek); showControls(); return; }
-  if (k === 'ArrowRight') { e.preventDefault(); if (!live) seekBy(seek); showControls(); return; }
+  if (k === 'ArrowLeft') { e.preventDefault(); if (!live) holdSeek(e, -1); showControls(); return; }
+  if (k === 'ArrowRight') { e.preventDefault(); if (!live) holdSeek(e, 1); showControls(); return; }
   if (k === ' ' || k === 'k' || k === 'K') { e.preventDefault(); togglePause(); showControls(); return; }
   if (k === 'Enter') { e.preventDefault(); if (live) { showNowInfo(); showControls(); } else { togglePause(); showControls(); } return; }
   if (k === 'm' || k === 'M') { toggleMute(); showControls(); return; }
@@ -2284,7 +2505,7 @@ window.addEventListener('offline', () => { if (state.screen === 'home') renderHo
   setInterval(lockWatch, 10000);
   await new Promise((r) => setTimeout(r, 30));
   try {
-    const cached = await window.api.cacheRead();
+    const cached = await window.api.cacheRead(PID);
     if (cached) {
       setPlaylist(parseM3u(cached));
       if (state.screen === 'home') renderHome();

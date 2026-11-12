@@ -101,7 +101,8 @@ class MainActivity : Activity() {
     private val marginNames = listOf("Aus", "Klein", "Mittel", "Groß", "Sehr groß")
     private val marginDp = listOf(0, 12, 24, 36, 48)
     private val resizeNames = listOf("Anpassen (Original-Format)", "Gestreckt (Vollbild)", "Zoom (Ränder abschneiden)")
-    private val seekChoices = listOf(5, 10, 20, 30, 60)
+    private val seekChoices = listOf(5, 10, 15, 20, 30, 60, 120, 300, 600)
+    private var resumeAt = 0L
     private val volumeChoices = listOf(100, 90, 80, 70, 60, 50, 40, 30, 20, 10)
     private val scaleNames = listOf("Klein", "Normal", "Groß", "Sehr groß")
     private val scaleValues = listOf(0.85f, 1.0f, 1.2f, 1.4f)
@@ -126,7 +127,7 @@ class MainActivity : Activity() {
     private lateinit var content: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var statusView: TextView
-    private val cacheFile by lazy { File(filesDir, "playlist.m3u") }
+    private val cacheFile: File get() = File(filesDir, if (store.activeProfile == 0) "playlist.m3u" else "playlist_${store.activeProfile}.m3u")
     private val bgFile by lazy { File(filesDir, "bg.jpg") }
 
     private var player: ExoPlayer? = null
@@ -188,21 +189,7 @@ class MainActivity : Activity() {
         applyMargin()
 
         showHome()
-        if (cacheFile.exists()) {
-            Thread {
-                runCatching {
-                    val pl = M3uParser.parse(cacheFile.readText())
-                    handler.post {
-                        if (channels.isEmpty()) {
-                            channels = pl.channels
-                            headerEpgUrl = pl.epgUrl
-                            if (screen == Screen.HOME) showHome()
-                            if (store.epgAuto) loadEpg()
-                        }
-                    }
-                }
-            }.start()
-        }
+        loadCacheAsync()
         loadWeather(false)
 
         val url = store.playlistUrl()
@@ -227,6 +214,9 @@ class MainActivity : Activity() {
         handler.removeCallbacks(stallRunnable)
         pcUnlockUntil = 0L
         settingsOkUntil = 0L
+        savePos()
+        if (streamChannel?.kind != Kind.LIVE) resumeAt = player?.currentPosition ?: 0L
+        handler.removeCallbacks(savePosRunnable)
         player?.release()
         player = null
     }
@@ -497,7 +487,7 @@ class MainActivity : Activity() {
         top.addView(timeBox, lp(0, -2, 1f))
         top.addView(iconButton(R.drawable.ic_search) { showSearchDialog(Kind.LIVE) })
         top.addView(iconButton(R.drawable.ic_heart) { showBrowse(Kind.LIVE, 1) })
-        top.addView(iconButton(R.drawable.ic_user) { gate { showAccountDialog() } })
+        top.addView(iconButton(R.drawable.ic_user) { gate { profileMenu() } })
         top.addView(iconButton(R.drawable.ic_refresh) { refreshAll() })
         page.addView(top, lp(-1, -2))
 
@@ -539,7 +529,7 @@ class MainActivity : Activity() {
             else -> "keine Playlist"
         }
         page.addView(
-            label("${channels.size} Einträge  ·  ${networkText()}  ·  $sourceText", 14f, 0xAAFFFFFF.toInt()),
+            label("${if (store.profiles().size > 1) "Profil: ${store.profileName(store.activeProfile)}  ·  " else ""}${channels.size} Einträge  ·  ${networkText()}  ·  $sourceText", 14f, 0xAAFFFFFF.toInt()),
             lp(-2, -2).apply { topMargin = dp(6) }
         )
 
@@ -1069,14 +1059,15 @@ class MainActivity : Activity() {
                 st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
                 st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.5") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.6") { showInfo() }
             )
         )
         grid.addView(
             row(
                 st(R.drawable.ic_settings, "Weitere Einstellungen", "Android-System") { openSystemSettings() },
                 st(R.drawable.ic_lock, "Jugendschutz", if (pcActive()) "PIN aktiv" else "Aus") { pcMenuEntry() },
-                st(R.drawable.ic_folder, "Sortierung", if (store.sortAz) "A–Z" else "Original") { sortMenu() }
+                st(R.drawable.ic_folder, "Sortierung", if (store.sortAz) "A–Z" else "Original") { sortMenu() },
+                st(R.drawable.ic_user, "Profile (Kunden)", store.profileName(store.activeProfile)) { profileMenu() }
             )
         )
 
@@ -1234,9 +1225,14 @@ class MainActivity : Activity() {
 
     // ---- Player-Einstellungen
 
+    private fun resumeName() = arrayOf("Automatisch", "Nachfragen", "Aus")[store.resumeMode.coerceIn(0, 2)]
+
     private fun playerSettings() {
         val items = arrayOf(
-            "Vor-/Zurückspulen: ${store.seekSec} Sekunden",
+            "Film/Serie – Spulschritt vorwärts: ${store.fwdSec} Sekunden",
+            "Film/Serie – Spulschritt zurück: ${store.backSec} Sekunden",
+            "Schneller spulen beim Gedrückthalten: ${onOff(store.accelSeek)}",
+            "Film/Serie – Fortsetzen: ${resumeName()}",
             "Lautstärke in der App: ${store.volume} %",
             "Bildschirmformat: ${resizeNames[store.resize]}"
         )
@@ -1244,8 +1240,11 @@ class MainActivity : Activity() {
             .setTitle("Player")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> pickSeek()
-                    1 -> pickVolume()
+                    0 -> pickSeek(true)
+                    1 -> pickSeek(false)
+                    2 -> { store.accelSeek = !store.accelSeek; playerSettings() }
+                    3 -> pickResume()
+                    4 -> pickVolume()
                     else -> pickResize()
                 }
             }
@@ -1253,13 +1252,25 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun pickSeek() {
-        val names = seekChoices.map { "$it Sekunden" }.toTypedArray()
-        val cur = seekChoices.indexOf(store.seekSec).coerceAtLeast(0)
+    private fun pickSeek(forward: Boolean) {
+        val names = seekChoices.map { if (it >= 60) "${it / 60} Minute${if (it >= 120) "n" else ""}${if (it % 60 != 0) " ${it % 60} s" else ""}" else "$it Sekunden" }.toTypedArray()
+        val curVal = if (forward) store.fwdSec else store.backSec
+        val cur = seekChoices.indexOf(curVal).coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Spulschritt (Links/Rechts)")
+            .setTitle(if (forward) "Spulschritt vorwärts (Rechts)" else "Spulschritt zurück (Links)")
             .setSingleChoiceItems(names, cur) { d, which ->
-                store.seekSec = seekChoices[which]
+                if (forward) store.fwdSec = seekChoices[which] else store.backSec = seekChoices[which]
+                d.dismiss()
+                playerSettings()
+            }
+            .show()
+    }
+
+    private fun pickResume() {
+        AlertDialog.Builder(this)
+            .setTitle("Film/Serie fortsetzen")
+            .setSingleChoiceItems(arrayOf("Automatisch weiterspielen", "Nachfragen", "Aus (immer von vorn)"), store.resumeMode) { d, which ->
+                store.resumeMode = which
                 d.dismiss()
                 playerSettings()
             }
@@ -1383,10 +1394,12 @@ class MainActivity : Activity() {
             return
         }
         if (verbose) status("EPG wird geladen …")
+        val epgPid = store.activeProfile
         Thread {
             try {
                 val loaded = openStream(url).use { Epg.load(it, System.currentTimeMillis()) }
                 handler.post {
+                    if (epgPid != store.activeProfile) return@post
                     epg = loaded
                     status("EPG geladen: ${loaded.size()} Sender", 2500)
                     if (screen == Screen.BROWSE && browseKind == Kind.LIVE) {
@@ -1793,6 +1806,7 @@ class MainActivity : Activity() {
 
     private fun restartPlayer() {
         if (player == null) return
+        if (streamChannel?.kind != Kind.LIVE) resumeAt = player?.currentPosition ?: 0L
         player?.release()
         player = null
         initPlayer()
@@ -2035,6 +2049,164 @@ class MainActivity : Activity() {
             .show()
     }
 
+
+    // ---------------------------------------------------------------- Profile (Kunden)
+
+    private fun loadCacheAsync() {
+        val pid = store.activeProfile
+        val f = cacheFile
+        if (!f.exists()) return
+        Thread {
+            runCatching {
+                val pl = M3uParser.parse(f.readText())
+                handler.post {
+                    if (pid == store.activeProfile && channels.isEmpty()) {
+                        channels = pl.channels
+                        headerEpgUrl = pl.epgUrl
+                        if (screen == Screen.HOME) showHome()
+                        if (store.epgAuto) loadEpg()
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun switchProfile(id: Int) {
+        if (id == store.activeProfile) return
+        savePos()
+        store.activeProfile = id
+        channels = emptyList()
+        epg = null
+        headerEpgUrl = ""
+        openSeries = null
+        showHome()
+        status("Profil: ${store.profileName(id)}", 2500)
+        loadCacheAsync()
+        val url = store.playlistUrl()
+        if (url.isNotBlank()) refreshPlaylist(url) else showAccountDialog()
+    }
+
+    private fun askName(title: String, initial: String, ok: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setSingleLine()
+            setText(initial)
+            hint = "Name, z. B. Kunde Müller"
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("OK") { _, _ ->
+                val n = input.text.toString().trim()
+                if (n.isNotEmpty()) ok(n)
+            }
+            .show()
+    }
+
+    private fun profileMenu() {
+        val list = store.profiles()
+        val labels = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        list.forEach { (id, name) ->
+            labels.add((if (id == store.activeProfile) "● " else "○ ") + name)
+            acts.add { switchProfile(id) }
+        }
+        labels.add("＋ Neues Profil"); acts.add {
+            askName("Neues Profil", "") { n ->
+                val id = store.addProfile(n)
+                switchProfile(id)
+            }
+        }
+        labels.add("Zugangsdaten bearbeiten"); acts.add { showAccountDialog() }
+        labels.add("Aktives Profil umbenennen"); acts.add {
+            askName("Profil umbenennen", store.profileName(store.activeProfile)) { n ->
+                store.renameProfile(store.activeProfile, n)
+                if (screen == Screen.HOME) showHome()
+            }
+        }
+        if (list.size > 1) {
+            labels.add("Aktives Profil löschen"); acts.add {
+                AlertDialog.Builder(this)
+                    .setTitle("Profil löschen?")
+                    .setMessage("„${store.profileName(store.activeProfile)}“ mit Zugangsdaten und Favoriten wird gelöscht.")
+                    .setNegativeButton("Abbrechen", null)
+                    .setPositiveButton("Löschen") { _, _ ->
+                        val id = store.activeProfile
+                        val f = cacheFile
+                        store.deleteProfile(id)
+                        runCatching { f.delete() }
+                        channels = emptyList(); epg = null; headerEpgUrl = ""
+                        showHome()
+                        loadCacheAsync()
+                        val url = store.playlistUrl()
+                        if (url.isNotBlank()) refreshPlaylist(url) else showAccountDialog()
+                    }
+                    .show()
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Profile (Kunden)")
+            .setItems(labels.toTypedArray()) { _, which -> acts[which]() }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- Film/Serie: Position merken
+
+    private fun clock(ms: Long): String {
+        val t = (ms / 1000).coerceAtLeast(0)
+        val h = t / 3600
+        val m = (t % 3600) / 60
+        val s = t % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+    }
+
+    private fun progressBar(pos: Long, dur: Long): String {
+        if (dur <= 0) return ""
+        val n = 24
+        val i = ((pos.toDouble() / dur) * n).toInt().coerceIn(0, n - 1)
+        return "━".repeat(i) + "●" + "─".repeat(n - 1 - i)
+    }
+
+    private fun savePos() {
+        val ch = streamChannel ?: return
+        if (ch.kind == Kind.LIVE) return
+        val p = player ?: return
+        val pos = p.currentPosition
+        val d = p.duration
+        if (pos < 10_000) return
+        if (d > 0 && d != androidx.media3.common.C.TIME_UNSET && (pos > d * 0.95 || d - pos < 60_000)) store.clearPos(ch.url)
+        else store.setPos(ch.url, pos)
+    }
+
+    private val savePosRunnable = object : Runnable {
+        override fun run() {
+            savePos()
+            handler.postDelayed(this, 10_000)
+        }
+    }
+
+    private fun startWithResume(ch: Channel) {
+        resumeAt = 0L
+        if (ch.kind == Kind.LIVE || store.resumeMode == 2) { loadStream(ch, true); return }
+        val saved = store.pos(ch.url)
+        if (saved < 10_000) { loadStream(ch, true); return }
+        if (store.resumeMode == 0) {
+            resumeAt = saved
+            status("Weiter bei ${clock(saved)}", 2500)
+            loadStream(ch, true)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Fortsetzen?")
+            .setMessage("${ch.name}\n\nWeiterschauen bei ${clock(saved)}?")
+            .setPositiveButton("Fortsetzen") { _, _ -> resumeAt = saved; loadStream(ch, true) }
+            .setNegativeButton("Von vorn") { _, _ -> store.clearPos(ch.url); loadStream(ch, true) }
+            .setOnCancelListener { loadStream(ch, true) }
+            .show()
+    }
+
     private fun showInfo() {
         val source = if (store.usesXtream()) {
             "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
@@ -2042,7 +2214,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.5")
+            .setTitle("DJ64 1.6")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -2062,14 +2234,17 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- Playlist
 
     private fun refreshPlaylist(url: String) {
+        val pid = store.activeProfile
         status("Playlist wird geladen …")
         Thread {
             try {
                 val text = openStream(url).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val parsed = M3uParser.parse(text)
                 if (parsed.channels.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
-                runCatching { cacheFile.writeText(text) }
+                val cf = cacheFile
+                runCatching { cf.writeText(text) }
                 handler.post {
+                    if (pid != store.activeProfile) return@post
                     channels = parsed.channels
                     headerEpgUrl = parsed.epgUrl
                     status("${parsed.channels.size} Einträge geladen", 2500)
@@ -2198,17 +2373,22 @@ class MainActivity : Activity() {
         streamChannel = ch
         retries = 0
         handler.removeCallbacks(retryRunnable)
-        p.setMediaItem(MediaItem.fromUri(ch.url))
+        val startAt = if (ch.kind != Kind.LIVE) resumeAt else 0L
+        resumeAt = 0L
+        if (startAt > 0) p.setMediaItem(MediaItem.fromUri(ch.url), startAt) else p.setMediaItem(MediaItem.fromUri(ch.url))
         p.prepare()
         p.playWhenReady = true
     }
 
     private fun startStream() {
         val ch = streamChannel ?: return
+        if (ch.kind != Kind.LIVE) resumeAt = player?.currentPosition ?: resumeAt
         loadStream(ch, true)
     }
 
     private fun hidePlayer() {
+        savePos()
+        handler.removeCallbacks(savePosRunnable)
         handler.removeCallbacks(retryRunnable)
         player?.stop()
         streamChannel = null
@@ -2236,7 +2416,9 @@ class MainActivity : Activity() {
         } else {
             infoPending = true
             status(ch.name)
-            loadStream(ch, true)
+            handler.removeCallbacks(savePosRunnable)
+            if (ch.kind != Kind.LIVE) handler.postDelayed(savePosRunnable, 10_000)
+            startWithResume(ch)
         }
     }
 
@@ -2256,15 +2438,29 @@ class MainActivity : Activity() {
 
     private fun seekBy(ms: Long) {
         val p = player ?: return
-        val target = (p.currentPosition + ms).coerceAtLeast(0)
+        val d = p.duration
+        var target = (p.currentPosition + ms).coerceAtLeast(0)
+        if (d > 0 && d != androidx.media3.common.C.TIME_UNSET) target = target.coerceAtMost((d - 1000).coerceAtLeast(0))
         p.seekTo(target)
-        status(if (ms > 0) "⏩ +${ms / 1000} s" else "⏪ ${ms / 1000} s", 1200)
+        val total = if (d > 0 && d != androidx.media3.common.C.TIME_UNSET) " / ${clock(d)}" else ""
+        val secs = Math.abs(ms) / 1000
+        val amount = if (secs >= 60) "${secs / 60} min${if (secs % 60 != 0L) " ${secs % 60} s" else ""}" else "$secs s"
+        status("${if (ms > 0) "⏩ +" else "⏪ −"}$amount  ·  ${clock(target)}$total\n${progressBar(target, if (d > 0) d else 0)}", 1800)
+        if (!p.playWhenReady) showPauseInfo()
+    }
+
+    private fun showPauseInfo() {
+        val p = player ?: return
+        val d = p.duration
+        val total = if (d > 0 && d != androidx.media3.common.C.TIME_UNSET) d else 0L
+        val title = playList.getOrNull(playIndex)?.name ?: ""
+        status("⏸ Pause  ·  ${clock(p.currentPosition)}${if (total > 0) " / ${clock(total)}" else ""}\n${progressBar(p.currentPosition, total)}\n$title")
     }
 
     private fun togglePause() {
         val p = player ?: return
         p.playWhenReady = !p.playWhenReady
-        status(if (p.playWhenReady) "▶ Weiter" else "⏸ Pause", 1500)
+        if (p.playWhenReady) status("▶ Weiter", 1200) else { savePos(); showPauseInfo() }
     }
 
     private fun changeVolume(delta: Int) {
@@ -2302,7 +2498,13 @@ class MainActivity : Activity() {
         if (screen != Screen.PLAYER) return super.onKeyDown(keyCode, event)
 
         val live = playKind == Kind.LIVE
-        val step = store.seekSec * 1000L
+        val fwd = store.fwdSec * 1000L
+        val back = store.backSec * 1000L
+        val rc = event.repeatCount
+        val isSeekKey = keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+        if (!live && isSeekKey && rc > 0 && rc % 4 != 0) return true
+        val accel = if (!store.accelSeek) 1 else when { rc < 4 -> 1; rc < 12 -> 2; rc < 24 -> 4; else -> 8 }
+        val step = fwd
         return when (keyCode) {
             KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); true }
             KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); true }
@@ -2315,15 +2517,15 @@ class MainActivity : Activity() {
                 true
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
-                if (live) exitPlayer() else seekBy(-step)
+                if (live) exitPlayer() else seekBy(-back * accel)
                 true
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                if (!live) seekBy(step)
+                if (!live) seekBy(fwd * accel)
                 true
             }
-            KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-3 * step); true }
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(3 * step); true }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-3 * back); true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(3 * fwd); true }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                 togglePause(); true
             }

@@ -5,26 +5,99 @@ import java.net.URLEncoder
 
 class Store(context: Context) {
     private val p = context.getSharedPreferences("dj64", Context.MODE_PRIVATE)
+    private val pp = context.getSharedPreferences("dj64pos", Context.MODE_PRIVATE)
+
+    // ---- Profile (Kunden): Profil 0 = bisherige Daten ohne Präfix
+    private val profileKeys = listOf("url", "server", "user", "pass", "epg", "hidden", "favorites", "recent")
+
+    var activeProfile: Int
+        get() = p.getInt("activeProfile", 0)
+        set(value) = p.edit().putInt("activeProfile", value).apply()
+
+    private fun key(id: Int, base: String) = if (id == 0) base else "p${id}_$base"
+    private fun k(base: String) = key(activeProfile, base)
+
+    fun profiles(): List<Pair<Int, String>> {
+        val l = (p.getString("profiles", null) ?: "").split('\n').mapNotNull {
+            val a = it.split('\t', limit = 2)
+            if (a.size == 2) a[0].toIntOrNull()?.let { id -> id to a[1] } else null
+        }
+        return if (l.isEmpty()) listOf(0 to "Hauptprofil") else l
+    }
+
+    private fun saveProfiles(l: List<Pair<Int, String>>) =
+        p.edit().putString("profiles", l.joinToString("\n") { "${it.first}\t${it.second}" }).apply()
+
+    fun profileName(id: Int): String = profiles().firstOrNull { it.first == id }?.second ?: "Profil"
+
+    fun addProfile(name: String): Int {
+        val l = profiles()
+        val id = (l.maxOfOrNull { it.first } ?: 0) + 1
+        saveProfiles(l + (id to name))
+        return id
+    }
+
+    fun renameProfile(id: Int, name: String) = saveProfiles(profiles().map { if (it.first == id) id to name else it })
+
+    fun deleteProfile(id: Int) {
+        val l = profiles().filter { it.first != id }
+        if (l.isEmpty()) return
+        val e = p.edit()
+        profileKeys.forEach { e.remove(key(id, it)) }
+        e.apply()
+        saveProfiles(l)
+        if (activeProfile == id) activeProfile = l[0].first
+    }
+
+    // ---- Film/Serie: Spulen und Fortsetzen
+    var fwdSec: Int
+        get() = p.getInt("fwd", p.getInt("seek", 10))
+        set(value) = p.edit().putInt("fwd", value).apply()
+    var backSec: Int
+        get() = p.getInt("back", p.getInt("seek", 10))
+        set(value) = p.edit().putInt("back", value).apply()
+    var accelSeek: Boolean
+        get() = p.getBoolean("accel", true)
+        set(value) = p.edit().putBoolean("accel", value).apply()
+    var resumeMode: Int // 0 automatisch, 1 fragen, 2 aus
+        get() = p.getInt("resume", 1)
+        set(value) = p.edit().putInt("resume", value).apply()
+
+    fun pos(url: String): Long = (pp.getString(url, null) ?: "").substringBefore('|').toLongOrNull() ?: 0L
+
+    fun setPos(url: String, ms: Long) {
+        val e = pp.edit()
+        e.putString(url, "$ms|${System.currentTimeMillis()}")
+        val all = pp.all
+        if (all.size > 200) {
+            all.entries.filter { it.key != url }
+                .minByOrNull { (it.value as? String ?: "").substringAfter('|', "0").toLongOrNull() ?: 0L }
+                ?.let { e.remove(it.key) }
+        }
+        e.apply()
+    }
+
+    fun clearPos(url: String) = pp.edit().remove(url).apply()
 
     private fun str(key: String): String = p.getString(key, null) ?: ""
     private fun put(key: String, value: String) = p.edit().putString(key, value).apply()
 
     // ---- Zugangsdaten
     var url: String // M3U-Wiedergabeliste
-        get() = str("url").ifBlank { Config.DEFAULT_PLAYLIST_URL }
-        set(value) = put("url", value)
+        get() = str(k("url")).ifBlank { if (activeProfile == 0) Config.DEFAULT_PLAYLIST_URL else "" }
+        set(value) = put(k("url"), value)
     var server: String
-        get() = str("server")
-        set(value) = put("server", value)
+        get() = str(k("server"))
+        set(value) = put(k("server"), value)
     var user: String
-        get() = str("user")
-        set(value) = put("user", value)
+        get() = str(k("user"))
+        set(value) = put(k("user"), value)
     var pass: String
-        get() = str("pass")
-        set(value) = put("pass", value)
+        get() = str(k("pass"))
+        set(value) = put(k("pass"), value)
     var epgManual: String
-        get() = str("epg")
-        set(value) = put("epg", value)
+        get() = str(k("epg"))
+        set(value) = put(k("epg"), value)
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
@@ -122,13 +195,13 @@ class Store(context: Context) {
         get() = HashSet(p.getStringSet("pcGroups", emptySet()) ?: emptySet())
         set(value) = p.edit().putStringSet("pcGroups", HashSet(value)).apply()
 
-    fun recent(): List<String> = str("recent").split('\n').filter { it.isNotBlank() }
+    fun recent(): List<String> = str(k("recent")).split('\n').filter { it.isNotBlank() }
 
     fun addRecent(url: String) {
         val l = ArrayList(recent())
         l.remove(url)
         l.add(0, url)
-        put("recent", l.take(30).joinToString("\n"))
+        put(k("recent"), l.take(30).joinToString("\n"))
     }
 
     var wxName: String
@@ -156,11 +229,11 @@ class Store(context: Context) {
         set(value) = p.edit().putString("last", value).apply()
 
     var hiddenGroups: Set<String>
-        get() = HashSet(p.getStringSet("hidden", emptySet()) ?: emptySet())
-        set(value) = p.edit().putStringSet("hidden", HashSet(value)).apply()
+        get() = HashSet(p.getStringSet(k("hidden"), emptySet()) ?: emptySet())
+        set(value) = p.edit().putStringSet(k("hidden"), HashSet(value)).apply()
 
     private fun favorites(): MutableSet<String> =
-        HashSet(p.getStringSet("favorites", emptySet()) ?: emptySet())
+        HashSet(p.getStringSet(k("favorites"), emptySet()) ?: emptySet())
 
     fun favoriteSet(): Set<String> = favorites()
 
@@ -171,7 +244,7 @@ class Store(context: Context) {
         } else {
             set.add(url); true
         }
-        p.edit().putStringSet("favorites", set).apply()
+        p.edit().putStringSet(k("favorites"), set).apply()
         return nowFavorite
     }
 }

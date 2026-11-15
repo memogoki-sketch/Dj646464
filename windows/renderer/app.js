@@ -1947,6 +1947,15 @@ function archiveUrl(ch, start, stop) {
 }
 
 function playSynthetic(c) {
+  if (externalFor(c)) {
+    clearTimeout(previewTimer);
+    playExternal(c, () => playSyntheticBuiltin(c));
+    return;
+  }
+  playSyntheticBuiltin(c);
+}
+
+function playSyntheticBuiltin(c) {
   state.play = { list: [c], idx: 0 };
   clearTimeout(previewTimer);
   setFull(true);
@@ -2038,6 +2047,7 @@ function renderSettings() {
       ${t('folder', 'Kategorien verwalten', 'Ausblenden und einblenden', 'cats')}
       ${t('calendar', 'Programmführer (EPG)', state.epg ? Object.keys(state.epg.channels).length + ' Sender' : 'nicht geladen', 'epg')}
       ${t('tune', 'Player', 'Ton · Format', 'player')}
+      ${t('tune', 'Engine, Format & Kennung', engineName(S.get('engLive', 'auto')) + ' · ' + uaName(), 'engine')}
       ${t('play', 'Film- & Serien-Wiedergabe', 'Spulen · Pause · Fortsetzen', 'vod')}
       ${t('text', 'Darstellung', 'Größe · Schrift · Farbe', 'look')}
       ${t('image', 'Hintergrundbild', '', 'bg')}
@@ -2048,7 +2058,7 @@ function renderSettings() {
       ${t('lock', 'Jugendschutz', parentalOn() ? 'PIN aktiv' : 'Aus', 'parental')}
       ${t('folder', 'Sortierung', sortMode() === 1 ? 'A–Z, Serien als Ordner' : 'Original', 'sortset')}
       ${t('trash', 'Cache leeren', '', 'cache')}
-      ${t('info', 'Info und Tasten', 'Version 1.3', 'info')}
+      ${t('info', 'Info und Tasten', 'Version 1.5', 'info')}
     </div>`;
   const f = $('#settings [data-act="account"]');
   if (f && !modals.length) f.focus();
@@ -2112,9 +2122,111 @@ function showEpgDialog() {
   });
 }
 
+/* ---------------- Engine, Stream-Format, Kennung, Anmeldeart ---------------- */
+
+const ENGINES = [
+  ['auto', 'Eingebaut (automatisch)'], ['ts', 'Eingebaut: mpegts.js'], ['hls', 'Eingebaut: hls.js'],
+  ['native', 'Eingebaut: Nativ (Chromium)'], ['vlc', 'VLC extern'], ['system', 'Windows-Standardplayer extern']
+];
+const STREAM_FORMATS = ['Wie in der Liste', 'TS', 'HLS (m3u8)'];
+const FORCES = ['Auto', 'HLS', 'MPEG-TS', 'DASH'];
+const UA_CHOICES = [
+  ['vlc', 'VLC (empfohlen)'], ['dj64', 'DJ64'], ['chrome', 'Browser (Chrome)'], ['kodi', 'Kodi'],
+  ['smarters', 'IPTV Smarters'], ['okhttp', 'okhttp'], ['custom', 'Eigene …']
+];
+const LOGINS = ['Automatisch', 'Nur M3U-Datei', 'Nur Xtream-API'];
+
+const engineName = (k) => (ENGINES.find((e) => e[0] === k) || ENGINES[0])[1];
+const uaName = () => {
+  const k = S.get('uaSel', 'vlc');
+  return k === 'custom' ? 'Eigene: ' + (S.get('uaCustom', '') || '(leer)') : (UA_CHOICES.find((u) => u[0] === k) || UA_CHOICES[0])[1];
+};
+const engineKeyFor = (ch) => (ch.kind === 'live' && !ch.archive ? 'engLive' : 'engVod');
+const engineFor = (ch) => S.get(engineKeyFor(ch), 'auto');
+const externalFor = (ch) => {
+  if (ch.drm) return null;
+  const e = engineFor(ch);
+  return e === 'vlc' || e === 'system' ? e : null;
+};
+
+/** Xtream-Live-Adressen: Endung nach der gewählten Stream-Format-Einstellung (nicht bei Archiv). */
+function fmtUrl(ch) {
+  const f = S.get('sfmt', 0);
+  if (!f || ch.kind !== 'live' || ch.archive) return ch.url;
+  const m = /^(https?:\/\/.+?\/live\/[^/]+\/[^/]+\/\d+)\.\w+(.*)$/.exec(ch.url);
+  return m ? `${m[1]}.${f === 2 ? 'm3u8' : 'ts'}${m[2]}` : ch.url;
+}
+
+function syncUa() {
+  try { window.api.setUa(S.get('uaSel', 'vlc'), S.get('uaCustom', '')); } catch (e) { /* egal */ }
+}
+
+/** Startet den Stream im externen Player; bei Fehlern läuft fallback() (eingebauter Player). */
+async function playExternal(ch, fallback) {
+  const kind = externalFor(ch);
+  stopStream();
+  let r = { ok: false, reason: 'ipc' };
+  try {
+    r = await window.api.playExternal(kind, { url: fmtUrl(ch), title: ch.name, ua: ch.ua || '', ref: ch.ref || '' });
+  } catch (e) { /* Rückfall */ }
+  if (r && r.ok) { toast('Läuft in ' + r.player, 3500); return; }
+  toast((kind === 'vlc' ? 'VLC nicht gefunden' : 'Externer Player nicht startbar') + ' – eingebauter Player startet', 4000);
+  fallback();
+}
+
+let uaCustomNext = false;
+function showEngine() {
+  menuDialog('Engine, Format & Kennung', () => [
+    {
+      label: 'Live-Player', value: engineName(S.get('engLive', 'auto')),
+      pick: (back) => pickDialog('Live-Player', ENGINES.map((e) => e[1]), Math.max(0, ENGINES.findIndex((e) => e[0] === S.get('engLive', 'auto'))), (k) => { S.set('engLive', ENGINES[k][0]); restartCurrent(); }, back)
+    },
+    {
+      label: 'Film- & Serien-Player', value: engineName(S.get('engVod', 'auto')),
+      pick: (back) => pickDialog('Film- & Serien-Player', ENGINES.map((e) => e[1]), Math.max(0, ENGINES.findIndex((e) => e[0] === S.get('engVod', 'auto'))), (k) => { S.set('engVod', ENGINES[k][0]); restartCurrent(); }, back)
+    },
+    {
+      label: 'Stream-Format (Xtream-Live)', value: STREAM_FORMATS[S.get('sfmt', 0)],
+      pick: (back) => pickDialog('Stream-Format (Xtream-Live)', STREAM_FORMATS, S.get('sfmt', 0), (k) => { S.set('sfmt', k); restartCurrent(); }, back)
+    },
+    {
+      label: 'Container erzwingen', value: FORCES[S.get('force', 0)],
+      pick: (back) => pickDialog('Container erzwingen', FORCES, S.get('force', 0), (k) => { S.set('force', k); restartCurrent(); }, back)
+    },
+    {
+      label: 'Kennung (User-Agent)', value: uaName(),
+      pick: (back) => pickDialog('Kennung gegenüber dem Anbieter', UA_CHOICES.map((u) => u[1]), Math.max(0, UA_CHOICES.findIndex((u) => u[0] === S.get('uaSel', 'vlc'))), (k) => {
+        S.set('uaSel', UA_CHOICES[k][0]);
+        syncUa();
+        if (UA_CHOICES[k][0] === 'custom') { uaCustomNext = true; return; }
+        restartCurrent();
+      }, () => { if (uaCustomNext) { uaCustomNext = false; showCustomUa(); } else back(); })
+    },
+    {
+      label: 'Anmeldeart', value: LOGINS[S.get('loginMode', 0)],
+      pick: (back) => pickDialog('Anmeldeart', LOGINS, S.get('loginMode', 0), (k) => { S.set('loginMode', k); refreshPlaylist(); }, back)
+    }
+  ]);
+}
+
+function showCustomUa() {
+  const body = el('div');
+  body.innerHTML = '<label>Eigene Kennung (User-Agent)</label><input type="text" id="f-ua" placeholder="z. B. MyPlayer/1.0">';
+  $('#f-ua', body).value = S.get('uaCustom', '');
+  openModal({
+    title: 'Eigene Kennung',
+    body,
+    buttons: [
+      { label: 'Abbrechen', onClick: () => { setTimeout(showEngine, 0); } },
+      { label: 'Speichern', primary: true, onClick: (m) => { S.set('uaCustom', $('#f-ua', m).value.trim()); syncUa(); restartCurrent(); setTimeout(showEngine, 0); } }
+    ]
+  });
+}
+
 function showPlayerSettings() {
   const vols = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10];
   menuDialog('Player', () => [
+    { label: 'Engine, Format & Kennung', value: engineName(S.get('engLive', 'auto')), pick: () => showEngine() },
     { label: 'Film- & Serien-Wiedergabe', value: 'Spulen · Fortsetzen', pick: () => showVodSettings() },
     { label: 'Standard-Lautstärke', value: S.get('volume', 100) + ' %', pick: (back) => pickDialog('Standard-Lautstärke', vols.map((v) => v + ' %'), vols.indexOf(S.get('volume', 100)), (k) => { S.set('volume', vols[k]); $('#video').volume = vols[k] / 100; }, back) },
     { label: 'Bildschirmformat', value: RESIZES[S.get('resize', 0)], pick: (back) => pickDialog('Bildschirmformat', RESIZES, S.get('resize', 0), (k) => { S.set('resize', k); applyLook(); }, back) }
@@ -2221,7 +2333,7 @@ function showInfo() {
   let host = '';
   try { host = new URL(playlistUrl()).host; } catch (e) { host = ''; }
   openModal({
-    title: 'DJ64 für Windows 1.4',
+    title: 'DJ64 für Windows 1.5',
     body: `<div>Live-TV: ${n.live} &nbsp; Filme: ${n.movie} &nbsp; Serien: ${n.series}<br>Favoriten: ${favSet().size}<br>Quelle: ${usesXtream() ? 'Xtream (API): ' + esc(host) + ' (Benutzer ' + esc(S.get('user', '')) + ')' : host ? 'M3U: ' + esc(host) : '(keine)'}</div>
     <div class="small" style="margin-top:1rem;line-height:1.7">
       <b>In der Liste</b><br>
@@ -2239,13 +2351,15 @@ function showInfo() {
 /* ---------------- Playlist laden ---------------- */
 
 async function refreshPlaylist() {
+  const lm = S.get('loginMode', 0); // 0 automatisch, 1 nur M3U, 2 nur Xtream-API
   const url = playlistUrl();
+  if (lm === 2 && !xtreamBase()) { toast('„Nur Xtream-API“ gewählt: Server und Benutzername fehlen (Zugangsdaten öffnen)', 6000); return; }
   if (!url) { showAccount(); return; }
   const pid = PID;
   toast('Playlist wird geladen …', 0);
   try {
     let pl = null;
-    const xb = xtreamBase();
+    const xb = lm === 1 ? null : xtreamBase();
     if (xb) {
       // Zuerst die schnelle JSON-Schnittstelle; bei Fehlern automatisch zurück auf get.php (M3U).
       try {
@@ -2253,6 +2367,7 @@ async function refreshPlaylist() {
         pl = { channels: r.channels.map(hydrate), epg: '' };
       } catch (e) {
         pl = null;
+        if (lm === 2) throw new Error('Xtream-API: ' + errMsg(e));
         if (pid === PID) toast('Xtream-Schnittstelle nicht erreichbar, lade M3U …', 2500);
       }
     }
@@ -2290,11 +2405,18 @@ let retryTimer = 0;
 let retries = 0;
 let playedOnce = false;
 let engineOrder = [];
+let curSrc = '';
 let osdTimer = 0;
 let ctlTimer = 0;
 
-function engineOrderFor(ch) {
-  const p = ch.url.split('?')[0].toLowerCase();
+function engineOrderFor(ch, url) {
+  const sel = engineFor(ch);
+  if (sel === 'ts' || sel === 'hls' || sel === 'native') return [sel];
+  const force = S.get('force', 0);
+  if (force === 1) return ['hls', 'native'];
+  if (force === 2) return ['ts', 'native'];
+  if (force === 3) return ['dash', 'native'];
+  const p = (url || ch.url).split('?')[0].toLowerCase();
   if (/\.mpd$/.test(p)) return ['dash', 'native'];
   if (/\.(m3u8|m3u)$/.test(p)) return ['hls', 'native'];
   if (/\.(mp4|webm|m4v|mov|mkv|avi)$/.test(p)) return ['native'];
@@ -2341,7 +2463,8 @@ function startStream(ch) {
   }
   loadToken++;
   clearTimeout(retryTimer);
-  engineOrder = engineOrderFor(ch);
+  curSrc = fmtUrl(ch);
+  engineOrder = engineOrderFor(ch, curSrc);
   playerEl.classList.remove('hidden');
   playerEl.classList.toggle('live-mode', ch.kind === 'live');
   placePlayer();
@@ -2379,7 +2502,7 @@ function tryEngine(i, token) {
     if (kind === 'ts') {
       if (!window.mpegts || !mpegts.getFeatureList().mseLivePlayback) { fail(); return; }
       mp = mpegts.createPlayer(
-        { type: 'mpegts', isLive: cur.kind === 'live', url: cur.url },
+        { type: 'mpegts', isLive: cur.kind === 'live', url: curSrc },
         Object.assign({ enableWorker: true }, bufCfg().ts)
       );
       mp.on(mpegts.Events.ERROR, fail);
@@ -2393,16 +2516,16 @@ function tryEngine(i, token) {
       const bc = bufCfg().hls;
       dash.updateSettings({ streaming: { buffer: { bufferTimeDefault: Math.max(8, bc.maxBufferLength / 2), bufferTimeAtTopQuality: bc.maxBufferLength, bufferToKeep: bc.backBufferLength } } });
       dash.on('error', fail);
-      dash.initialize(video, cur.url, true);
+      dash.initialize(video, curSrc, true);
     } else if (kind === 'hls') {
       if (!window.Hls || !Hls.isSupported()) { fail(); return; }
       hls = new Hls(Object.assign({ enableWorker: true }, bufCfg().hls));
       hls.on(Hls.Events.ERROR, (_e, d) => { if (d && d.fatal) fail(); });
       hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); });
-      hls.loadSource(cur.url);
+      hls.loadSource(curSrc);
       hls.attachMedia(video);
     } else {
-      video.src = cur.url;
+      video.src = curSrc;
       video.play().catch(() => {});
     }
   } catch (e) {
@@ -2525,6 +2648,10 @@ function playFull(index) {
   updatePane(ch);
   clearTimeout(previewTimer);
   const same = cur && cur.url === ch.url && playedOnce;
+  if (!same && externalFor(ch)) {
+    playExternal(ch, () => { setFull(true); startStream(ch); buildControls(); showControls(); });
+    return;
+  }
   setFull(true);
   if (!same) startStream(ch);
   else showNowInfo();
@@ -2734,6 +2861,7 @@ document.addEventListener('click', (e) => {
     cats: () => showCats(),
     epg: () => showEpgDialog(),
     player: () => showPlayerSettings(),
+    engine: () => showEngine(),
     look: () => showLook(),
     bg: () => showBgMenu(),
     cache: async () => { await window.api.cacheClear(PID); toast('Cache geleert', 2000); if (playlistUrl()) refreshPlaylist(); },
@@ -2926,6 +3054,7 @@ window.addEventListener('offline', () => { if (state.screen === 'home') renderHo
 (async function init() {
   migrateSecrets();
   applyLook();
+  syncUa();
   video.volume = S.get('volume', 100) / 100;
   // Zuerst sofort zeichnen und das Intro starten, danach erst Daten laden (blockiert keine Eingabe).
   renderHome();

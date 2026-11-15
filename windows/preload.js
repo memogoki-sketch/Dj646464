@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('api', {
   xtreamLoad: (a) => ipcRenderer.invoke('xtream-load', a),
   xtreamSeries: (a) => ipcRenderer.invoke('xtream-series', a),
   setHeaders: (url, h) => ipcRenderer.invoke('set-headers', url, h),
+  setUa: (mode, custom) => ipcRenderer.invoke('set-ua', mode, custom),
+  playExternal: (kind, o) => ipcRenderer.invoke('play-external', kind, o),
   encSync: (text) => ipcRenderer.sendSync('secret-enc', text),
   decSync: (text) => ipcRenderer.sendSync('secret-dec', text),
   cacheRead: (id) => ipcRenderer.invoke('cache-read', id),

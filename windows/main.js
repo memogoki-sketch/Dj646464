@@ -1,5 +1,7 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu, safeStorage, session } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, safeStorage, session, shell } = require('electron');
+const { spawn, execFile } = require('child_process');
+const logic = require('./engine-logic.js');
 const { Worker } = require('worker_threads');
 const xtream = require('./xtream.js');
 const { parseEpgBuffer } = require('./epg.js');
@@ -79,18 +81,19 @@ function request1(url, headers = {}, redirects = 0) {
 
 // Manche Anbieter sperren unbekannte Programme (z. B. mit seltsamen Codes wie 884).
 // Darum: erst als VLC melden, bei HTTP-Fehlern die anderen Kennungen probieren und die passende merken.
-const VLC_UA = 'VLC/3.0.20 LibVLC/3.0.20';
-const UAS = [VLC_UA, 'DJ64/1.5', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'];
-let uaPref = 0;
+// Gewählte Kennung (Einstellungen): bei VLC/DJ64/Chrome wird durchprobiert und die passende gemerkt,
+// bei Kodi/Smarters/okhttp/Eigene gilt genau diese Kennung.
+const uaSel = { mode: 'vlc', custom: '', learned: '' };
+const uaList = () => logic.uaCandidates(uaSel.mode, uaSel.custom, uaSel.learned);
 async function request(url, headers = {}) {
   url = String(url).replace(/\s+/g, '');
   if (headers['User-Agent']) return request1(url, headers);
   let last = null;
-  for (let k = 0; k < UAS.length; k++) {
-    const i = (uaPref + k) % UAS.length;
+  const cands = uaList();
+  for (let k = 0; k < cands.length; k++) {
     try {
-      const r = await request1(url, Object.assign({}, headers, { 'User-Agent': UAS[i] }));
-      uaPref = i;
+      const r = await request1(url, Object.assign({}, headers, { 'User-Agent': cands[k].ua }));
+      if (k > 0 && logic.CYCLE.includes(uaSel.mode)) uaSel.learned = cands[k].key;
       return r;
     } catch (e) {
       last = e;
@@ -205,7 +208,7 @@ function installHeaderHook() {
     const r = headerRules.size ? headerRules.get(originOf(details.url)) : null;
     if (!r) {
       const h0 = Object.assign({}, details.requestHeaders);
-      h0['User-Agent'] = UAS[uaPref];
+      h0['User-Agent'] = uaList()[0].ua;
       cb({ requestHeaders: h0 });
       return;
     }
@@ -239,6 +242,46 @@ ipcMain.handle('epg-load', async (_e, url, opts) => epgLoad(url, opts));
 const getJson = async (url) => JSON.parse(maybeGunzip(await getBuffer(url)).toString('utf8'));
 ipcMain.handle('xtream-load', async (_e, a) => xtream.loadAll(String(a.base), String(a.user), String(a.pass), getJson));
 ipcMain.handle('xtream-series', async (_e, a) => xtream.seriesInfo(String(a.base), String(a.user), String(a.pass), String(a.id), String(a.name || ''), getJson));
+ipcMain.handle('set-ua', async (_e, mode, custom) => {
+  uaSel.mode = String(mode || 'vlc');
+  uaSel.custom = String(custom || '');
+  uaSel.learned = '';
+  return uaList()[0].ua;
+});
+
+function findVlc() {
+  return new Promise((resolve) => {
+    const hit = logic.vlcPaths(process.env).find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } });
+    if (hit) return resolve(hit);
+    if (process.platform !== 'win32') return resolve('');
+    execFile('reg', ['query', 'HKLM\\SOFTWARE\\VideoLAN\\VLC', '/v', 'InstallDir'], { windowsHide: true, timeout: 4000 }, (err, out) => {
+      if (err) return resolve('');
+      const m = /InstallDir\s+REG_SZ\s+(.+)/i.exec(String(out));
+      const p = m ? path.join(m[1].trim(), 'vlc.exe') : '';
+      resolve(p && fs.existsSync(p) ? p : '');
+    });
+  });
+}
+
+ipcMain.handle('play-external', async (_e, kind, o) => {
+  const url = String((o && o.url) || '');
+  if (!/^https?:\/\//i.test(url)) return { ok: false, reason: 'bad-url' };
+  if (kind === 'system') {
+    try { await shell.openExternal(url); return { ok: true, player: 'Windows-Standardplayer' }; } catch (e) { return { ok: false, reason: 'system' }; }
+  }
+  const exe = await findVlc();
+  if (!exe) return { ok: false, reason: 'vlc-missing' };
+  const ua = (o && o.ua) || uaList()[0].ua;
+  try {
+    const c = spawn(exe, logic.vlcArgs({ url, title: String(o.title || ''), ua, ref: String(o.ref || '') }), { detached: true, stdio: 'ignore', windowsHide: false });
+    c.on('error', () => {});
+    c.unref();
+    return { ok: true, player: 'VLC' };
+  } catch (e) {
+    return { ok: false, reason: 'spawn' };
+  }
+});
+
 ipcMain.handle('set-headers', async (_e, url, h) => {
   if (!h) { headerRules.clear(); return true; }
   const o = originOf(url);

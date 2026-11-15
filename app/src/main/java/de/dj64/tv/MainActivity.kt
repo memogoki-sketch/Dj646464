@@ -103,6 +103,10 @@ class MainActivity : Activity() {
     private val resizeNames = listOf("Anpassen (Original-Format)", "Gestreckt (Vollbild)", "Zoom (Ränder abschneiden)")
     private val seekChoices = listOf(5, 10, 15, 20, 30, 60, 120, 300, 600)
     private var resumeAt = 0L
+    private var httpFactory: DefaultHttpDataSource.Factory? = null
+    private val xepCache = HashMap<String, List<Channel>>()
+    private var archiveBack: Pair<Int, Int>? = null
+    private val binFile: File get() = File(filesDir, if (store.activeProfile == 0) "playlist.bin" else "playlist_${store.activeProfile}.bin")
     private val volumeChoices = listOf(100, 90, 80, 70, 60, 50, 40, 30, 20, 10)
     private val scaleNames = listOf("Klein", "Normal", "Groß", "Sehr groß")
     private val scaleValues = listOf(0.85f, 1.0f, 1.2f, 1.4f)
@@ -189,6 +193,7 @@ class MainActivity : Activity() {
         applyMargin()
 
         showHome()
+        store.migrateSecrets()
         loadCacheAsync()
         loadWeather(false)
 
@@ -579,7 +584,7 @@ class MainActivity : Activity() {
             }
             val c = items[position]
             row.num.text = (position + 1).toString()
-            row.name.text = (if (c.url in favs) "★ " else "") + c.name
+            row.name.text = (if (c.url in favs) "★ " else "") + c.name + (if (c.archiveDays > 0) "  📼" else "")
             var sub = c.group
             val info = seriesInfo[c.url]
             if (info != null) {
@@ -772,6 +777,7 @@ class MainActivity : Activity() {
                     fillChannels(browseCat)
                     showBrowse(browseKind, browseCat, -1, browseQuery)
                 }
+                ch.url.startsWith("xseries://") -> openXSeries(ch, pos)
                 ch.url.startsWith("series://") -> {
                     openFolderPos = pos
                     openSeries = ch.url
@@ -782,7 +788,7 @@ class MainActivity : Activity() {
             }
         }
         cList.setOnItemLongClickListener { _, _, pos, _ ->
-            toggleFavorite(pos)
+            currentItems.getOrNull(pos)?.let { channelMenu(it, pos) }
             true
         }
 
@@ -838,7 +844,7 @@ class MainActivity : Activity() {
         page.addView(body, lp(-1, 0, 1f).apply { topMargin = dp(6) })
 
         page.addView(
-            label("OK = Vollbild  ·  OK lange drücken = Favorit  ·  Zurück = Startseite", 13f, 0xAAFFFFFF.toInt()),
+            label("OK = Vollbild  ·  OK lange drücken = Menü (Favorit, Archiv)  ·  Zurück = Startseite", 13f, 0xAAFFFFFF.toInt()),
             lp(-2, -2).apply { topMargin = dp(6) }
         )
 
@@ -1059,7 +1065,7 @@ class MainActivity : Activity() {
                 st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
                 st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.6") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.7") { showInfo() }
             )
         )
         grid.addView(
@@ -1217,6 +1223,7 @@ class MainActivity : Activity() {
 
     private fun clearCache() {
         runCatching { cacheFile.delete() }
+        runCatching { binFile.delete() }
         runCatching { cacheDir.deleteRecursively() }
         status("Cache geleert", 2000)
         val url = store.playlistUrl()
@@ -1395,9 +1402,27 @@ class MainActivity : Activity() {
         }
         if (verbose) status("EPG wird geladen …")
         val epgPid = store.activeProfile
+        val live = channels.filter { it.kind == Kind.LIVE }
+        val ids = live.mapNotNull { it.tvgId.takeIf { s -> s.isNotEmpty() } }.toHashSet()
+        val names = live.map { Epg.norm(it.name) }.toHashSet()
+        val arc = live.filter { it.archiveDays > 0 }
+        val arcIds = arc.mapNotNull { it.tvgId.takeIf { s -> s.isNotEmpty() } }.toHashSet()
+        val arcNames = arc.map { Epg.norm(it.name) }.toHashSet()
+        val epgFile = File(cacheDir, "epg_$epgPid.xml")
         Thread {
             try {
-                val loaded = openStream(url).use { Epg.load(it, System.currentTimeMillis()) }
+                val fresh = !verbose && epgFile.exists() && System.currentTimeMillis() - epgFile.lastModified() < 6 * 3600_000L
+                if (!fresh) {
+                    try {
+                        val tmp = File(epgFile.path + ".tmp")
+                        openStream(url).use { i -> tmp.outputStream().use { o -> i.copyTo(o, 65536) } }
+                        epgFile.delete()
+                        tmp.renameTo(epgFile)
+                    } catch (t: Throwable) {
+                        if (!epgFile.exists()) throw t
+                    }
+                }
+                val loaded = epgFile.inputStream().use { Epg.load(it, System.currentTimeMillis(), ids, names, arcIds, arcNames) }
                 handler.post {
                     if (epgPid != store.activeProfile) return@post
                     epg = loaded
@@ -1893,7 +1918,7 @@ class MainActivity : Activity() {
         }
     })
 
-    private fun isReal(c: Channel) = !c.url.startsWith("series://") && !c.url.startsWith("lock://")
+    private fun isReal(c: Channel) = !c.url.startsWith("series://") && !c.url.startsWith("xseries://") && !c.url.startsWith("lock://")
 
     // ---------------------------------------------------------------- Jugendschutz
 
@@ -1905,8 +1930,16 @@ class MainActivity : Activity() {
     private fun chLocked(c: Channel) = groupLocked(groupOf(c)) || (pcActive() && store.pcAuto && adultRe.containsMatchIn(c.name))
     private fun hiddenByPc(c: Channel) = chLocked(c) && !pcUnlocked()
 
-    private fun hashPin(pin: String): String =
-        java.security.MessageDigest.getInstance("SHA-256").digest("dj64:$pin".toByteArray()).joinToString("") { "%02x".format(it) }
+    private fun hashWith(pin: String, salt: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest("$salt:$pin".toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private fun hashPin(pin: String): String = hashWith(pin, store.pinSalt())
+
+    private fun pinOk(pin: String): Boolean {
+        if (hashPin(pin) == store.pcHash) return true
+        if (hashWith(pin, "dj64") == store.pcHash) { store.pcHash = hashPin(pin); return true }
+        return false
+    }
 
     private fun askPin(title: String = "PIN eingeben", unlock: Boolean = false, ok: () -> Unit) {
         if (!pcActive()) { ok(); return }
@@ -1927,7 +1960,7 @@ class MainActivity : Activity() {
             .setView(input)
             .setNegativeButton("Abbrechen", null)
             .setPositiveButton("OK") { _, _ ->
-                if (hashPin(input.text.toString()) == store.pcHash) {
+                if (pinOk(input.text.toString())) {
                     pcFails = 0
                     if (unlock) pcUnlockUntil = System.currentTimeMillis() + 30 * 60_000L
                     ok()
@@ -2055,10 +2088,11 @@ class MainActivity : Activity() {
     private fun loadCacheAsync() {
         val pid = store.activeProfile
         val f = cacheFile
-        if (!f.exists()) return
+        val bf = binFile
+        if (!f.exists() && !bf.exists()) return
         Thread {
             runCatching {
-                val pl = M3uParser.parse(f.readText())
+                val pl = (if (bf.exists()) PlaylistCache.read(bf) else null) ?: M3uParser.parse(f.readText())
                 handler.post {
                     if (pid == store.activeProfile && channels.isEmpty()) {
                         channels = pl.channels
@@ -2134,8 +2168,10 @@ class MainActivity : Activity() {
                     .setPositiveButton("Löschen") { _, _ ->
                         val id = store.activeProfile
                         val f = cacheFile
+                        val bf = binFile
                         store.deleteProfile(id)
                         runCatching { f.delete() }
+                        runCatching { bf.delete() }
                         channels = emptyList(); epg = null; headerEpgUrl = ""
                         showHome()
                         loadCacheAsync()
@@ -2207,6 +2243,155 @@ class MainActivity : Activity() {
             .show()
     }
 
+
+    // ---------------------------------------------------------------- Xtream-Serien, Archiv, DRM
+
+    private fun openXSeries(ch: Channel, pos: Int) {
+        val xt = store.xtream() ?: return
+        fun show(eps: List<Channel>) {
+            seriesFolders[ch.url] = eps
+            openFolderPos = pos
+            openSeries = ch.url
+            fillChannels(browseCat)
+            chanList?.setSelection(0)
+        }
+        val cached = xepCache[ch.url]
+        if (cached != null) { show(cached); return }
+        status("Folgen werden geladen …")
+        val pid = store.activeProfile
+        Thread {
+            try {
+                val eps = sortEpisodes(XtreamApi.episodes(xt, ch) { openStream(it) })
+                handler.post {
+                    status(null)
+                    if (pid == store.activeProfile && screen == Screen.BROWSE) {
+                        xepCache[ch.url] = eps
+                        show(eps)
+                    }
+                }
+            } catch (t: Throwable) {
+                handler.post { status("Fehler: ${t.message}", 4000) }
+            }
+        }.start()
+    }
+
+    private fun toggleFavUrl(ch: Channel, pos: Int) {
+        if (pos >= 0 && currentItems.getOrNull(pos)?.url == ch.url) { toggleFavorite(pos); return }
+        val now = store.toggleFavorite(ch.url)
+        status(if (now) "★ Favorit gespeichert" else "Favorit entfernt", 1500)
+    }
+
+    private fun channelMenu(ch: Channel, pos: Int) {
+        if (!isReal(ch)) { toggleFavorite(pos); return }
+        val labels = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        labels.add(if (ch.url in store.favoriteSet()) "★ Aus Favoriten entfernen" else "★ Zu Favoriten hinzufügen")
+        acts.add { toggleFavUrl(ch, pos) }
+        if (ch.kind == Kind.LIVE) {
+            labels.add("Programm (nächste Sendungen)"); acts.add { showUpcoming(ch) }
+            if (Catchup.has(ch)) {
+                labels.add("📼 Sendungsarchiv (verpasste Sendungen)"); acts.add { showArchive(ch) }
+                val cur = epg?.nowNext(ch, System.currentTimeMillis())?.first
+                if (cur != null) {
+                    labels.add("⏮ Laufende Sendung von vorn schauen"); acts.add { playArchive(ch, cur) }
+                }
+            }
+        } else if (store.pos(ch.url) > 0) {
+            labels.add("Gemerkte Position löschen"); acts.add { store.clearPos(ch.url); status("Position gelöscht", 1500) }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(ch.name)
+            .setItems(labels.toTypedArray()) { _, which -> acts[which]() }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun showUpcoming(ch: Channel) {
+        val (cur, next) = epg?.upcoming(ch, System.currentTimeMillis(), 10) ?: Pair(null, emptyList())
+        val sb = StringBuilder()
+        if (cur != null) sb.append("Jetzt: ${hm(cur.start)}–${hm(cur.stop)}  ${cur.title}\n\n")
+        next.forEach { sb.append("${hm(it.start)}  ${it.title}\n") }
+        AlertDialog.Builder(this)
+            .setTitle(ch.name)
+            .setMessage(if (sb.isEmpty()) "Kein Programm vorhanden." else sb.toString())
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun showArchive(ch: Channel) {
+        val list = epg?.past(ch, System.currentTimeMillis(), ch.archiveDays) ?: emptyList()
+        if (list.isEmpty()) { status("Im Programmführer sind keine vergangenen Sendungen vorhanden", 4000); return }
+        val dayFmt = SimpleDateFormat("EEEE, dd.MM.", Locale.GERMANY)
+        val days = LinkedHashMap<String, MutableList<Prog>>()
+        list.forEach { days.getOrPut(dayFmt.format(Date(it.start))) { ArrayList() }.add(it) }
+        val keys = days.keys.toList()
+        AlertDialog.Builder(this)
+            .setTitle("Archiv – ${ch.name}")
+            .setItems(keys.map { "$it  (${days[it]!!.size})" }.toTypedArray()) { _, which ->
+                val progs = days[keys[which]]!!
+                AlertDialog.Builder(this)
+                    .setTitle(keys[which])
+                    .setItems(progs.map { "${hm(it.start)}  ${it.title}" }.toTypedArray()) { _, i -> playArchive(ch, progs[i]) }
+                    .setNegativeButton("Zurück") { _, _ -> showArchive(ch) }
+                    .show()
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun playArchive(ch: Channel, p: Prog) {
+        val mins = ((p.stop - p.start) / 60_000).toInt().coerceAtLeast(1)
+        val u = Catchup.url(ch, p.start, mins)
+        if (u == null) { status("Archiv für diesen Sender nicht verfügbar", 3000); return }
+        val a = ch.copy(name = "${ch.name} – ${p.title}", url = u, kind = Kind.MOVIE, archiveDays = 0, catchupSource = "")
+        val back = Pair(browseCat, if (screen == Screen.PLAYER) playIndex else (chanList?.selectedItemPosition ?: -1))
+        archiveBack = back
+        play(listOf(a), 0)
+    }
+
+    private fun buildItem(ch: Channel): MediaItem {
+        val b = MediaItem.Builder().setUri(ch.url)
+        if (ch.url.substringBefore('?').endsWith(".mpd", true)) b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+        val headers = HashMap<String, String>()
+        if (ch.ua.isNotBlank()) headers["User-Agent"] = ch.ua
+        if (ch.referer.isNotBlank()) headers["Referer"] = ch.referer
+        when (ch.drmType) {
+            "widevine" -> if (ch.drmKey.startsWith("http")) {
+                b.setDrmConfiguration(
+                    MediaItem.DrmConfiguration.Builder(androidx.media3.common.C.WIDEVINE_UUID)
+                        .setLicenseUri(ch.drmKey)
+                        .setLicenseRequestHeaders(headers)
+                        .setMultiSession(true)
+                        .build()
+                )
+            }
+            "clearkey" -> {
+                val lic: String? = if (ch.drmKey.startsWith("http")) ch.drmKey else {
+                    val kid = ch.drmKey.substringBefore(':')
+                    val key = ch.drmKey.substringAfter(':', "")
+                    fun b64(hex: String): String? = try {
+                        val bytes = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+                        android.util.Base64.encodeToString(bytes, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+                    } catch (e: Exception) { null }
+                    val k = b64(key)
+                    val i = b64(kid)
+                    if (k == null || i == null) null else {
+                        val json = "{\"keys\":[{\"kty\":\"oct\",\"k\":\"$k\",\"kid\":\"$i\"}],\"type\":\"temporary\"}"
+                        "data:application/json;base64," + android.util.Base64.encodeToString(json.toByteArray(), android.util.Base64.NO_WRAP)
+                    }
+                }
+                if (lic != null) {
+                    b.setDrmConfiguration(
+                        MediaItem.DrmConfiguration.Builder(androidx.media3.common.C.CLEARKEY_UUID)
+                            .setLicenseUri(lic)
+                            .build()
+                    )
+                }
+            }
+        }
+        return b.build()
+    }
+
     private fun showInfo() {
         val source = if (store.usesXtream()) {
             "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
@@ -2214,7 +2399,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.6")
+            .setTitle("DJ64 1.7")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -2238,13 +2423,21 @@ class MainActivity : Activity() {
         status("Playlist wird geladen …")
         Thread {
             try {
-                val text = openStream(url).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val parsed = M3uParser.parse(text)
+                var got: Playlist? = null
+                val xt = store.xtream()
+                if (xt != null) {
+                    try {
+                        val list = XtreamApi.load(xt) { openStream(it) }
+                        if (list.isNotEmpty()) got = Playlist(list, "")
+                    } catch (e: Exception) { /* Rückfall auf die M3U-Liste */ }
+                }
+                val parsed = got ?: openStream(url).use { M3uParser.parse(java.io.InputStreamReader(it, Charsets.UTF_8)) }
                 if (parsed.channels.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
-                val cf = cacheFile
-                runCatching { cf.writeText(text) }
+                val bf = binFile
+                runCatching { PlaylistCache.write(bf, parsed) }
                 handler.post {
                     if (pid != store.activeProfile) return@post
+                    xepCache.clear()
                     channels = parsed.channels
                     headerEpgUrl = parsed.epgUrl
                     status("${parsed.channels.size} Einträge geladen", 2500)
@@ -2295,8 +2488,8 @@ class MainActivity : Activity() {
 
     private fun initPlayer() {
         if (player != null) return
-        val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent("DJ64/1.4")
+        val dataSource = DefaultHttpDataSource.Factory().also { httpFactory = it }
+            .setUserAgent("DJ64/1.7")
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
@@ -2375,7 +2568,10 @@ class MainActivity : Activity() {
         handler.removeCallbacks(retryRunnable)
         val startAt = if (ch.kind != Kind.LIVE) resumeAt else 0L
         resumeAt = 0L
-        if (startAt > 0) p.setMediaItem(MediaItem.fromUri(ch.url), startAt) else p.setMediaItem(MediaItem.fromUri(ch.url))
+        httpFactory?.setUserAgent(ch.ua.ifBlank { "DJ64/1.7" })
+        httpFactory?.setDefaultRequestProperties(if (ch.referer.isNotBlank()) mapOf("Referer" to ch.referer) else emptyMap())
+        val item = buildItem(ch)
+        if (startAt > 0) p.setMediaItem(item, startAt) else p.setMediaItem(item)
         p.prepare()
         p.playWhenReady = true
     }
@@ -2403,7 +2599,7 @@ class MainActivity : Activity() {
         playIndex = index
         playKind = ch.kind
         store.lastUrl = ch.url
-        store.addRecent(ch.url)
+        if (archiveBack == null) store.addRecent(ch.url)
         screen = Screen.PLAYER
         content.visibility = View.GONE
         playerView.layoutParams = FrameLayout.LayoutParams(-1, -1)
@@ -2425,6 +2621,13 @@ class MainActivity : Activity() {
     private fun exitPlayer() {
         infoPending = false
         status(null)
+        val back = archiveBack
+        if (back != null) {
+            archiveBack = null
+            hidePlayer()
+            showBrowse(Kind.LIVE, back.first, back.second, browseQuery)
+            return
+        }
         val pos = playIndex
         if (playKind != Kind.LIVE) hidePlayer()
         showBrowse(playKind, browseCat, pos, browseQuery)
@@ -2534,7 +2737,7 @@ class MainActivity : Activity() {
                 true
             }
             KeyEvent.KEYCODE_PROG_RED -> { cycleResize(); true }
-            KeyEvent.KEYCODE_MENU -> { exitPlayer(); true }
+            KeyEvent.KEYCODE_MENU -> { if (live) playList.getOrNull(playIndex)?.let { channelMenu(it, -1) } else exitPlayer(); true }
             else -> super.onKeyDown(keyCode, event)
         }
     }

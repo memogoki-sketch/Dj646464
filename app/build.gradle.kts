@@ -11,8 +11,8 @@ android {
         applicationId = "de.dj64.tv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 8
+        versionName = "1.7"
     }
 
     // Fester Schlüssel, damit spätere Updates über die installierte App möglich sind
@@ -46,5 +46,6 @@ android {
 dependencies {
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
 }

@@ -8,7 +8,14 @@ data class Channel(
     val group: String,
     val kind: Kind,
     val tvgId: String = "",
-    val logo: String = ""
+    val logo: String = "",
+    val streamId: String = "",
+    val archiveDays: Int = 0,
+    val ua: String = "",
+    val referer: String = "",
+    val drmType: String = "",
+    val drmKey: String = "",
+    val catchupSource: String = ""
 )
 
 data class Playlist(val channels: List<Channel>, val epgUrl: String)
@@ -52,15 +59,29 @@ object M3uParser {
             .firstOrNull { it.groupValues[1].equals(name, ignoreCase = true) }
             ?.groupValues?.get(2) ?: ""
 
-    fun parse(text: String): Playlist {
+    fun parse(text: String): Playlist = parseLines(text.lineSequence())
+
+    /** Liest die Liste zeilenweise aus dem Datenstrom (kein riesiger Gesamttext im Speicher). */
+    fun parse(reader: java.io.Reader): Playlist =
+        java.io.BufferedReader(reader, 65536).useLines { parseLines(it) }
+
+    private fun urlDecode(s: String): String = try { java.net.URLDecoder.decode(s, "UTF-8") } catch (e: Exception) { s }
+
+    private fun parseLines(lines: Sequence<String>): Playlist {
         val result = ArrayList<Channel>()
+        var pendingUa = ""
+        var pendingRef = ""
+        var pendingDrmType = ""
+        var pendingDrmKey = ""
+        var pendingArchive = 0
+        var pendingCatchupSrc = ""
         var pendingName: String? = null
         var pendingGroup = ""
         var pendingId = ""
         var pendingLogo = ""
         var epgUrl = ""
 
-        for (raw in text.lineSequence()) {
+        for (raw in lines) {
             val line = raw.trim().removePrefix("﻿")
             if (line.isEmpty()) continue
 
@@ -73,11 +94,50 @@ object M3uParser {
                 pendingGroup = attr(line, "group-title")
                 pendingId = attr(line, "tvg-id")
                 pendingLogo = attr(line, "tvg-logo")
+                val days = (attr(line, "catchup-days").ifEmpty { attr(line, "tvg-rec") }).toIntOrNull() ?: 0
+                pendingCatchupSrc = attr(line, "catchup-source")
+                pendingArchive = if (days > 0) days
+                    else if (attr(line, "catchup").isNotEmpty() || pendingCatchupSrc.isNotEmpty()) 3 else 0
+            } else if (line.startsWith("#EXTVLCOPT:", ignoreCase = true)) {
+                val kv = line.substringAfter(':')
+                val k = kv.substringBefore('=').lowercase()
+                val v = kv.substringAfter('=', "")
+                if (k == "http-user-agent") pendingUa = v
+                else if (k == "http-referrer" || k == "http-referer") pendingRef = v
+            } else if (line.startsWith("#KODIPROP:", ignoreCase = true)) {
+                val kv = line.substringAfter(':')
+                val k = kv.substringBefore('=').lowercase()
+                val v = kv.substringAfter('=', "")
+                if (k.endsWith("license_type")) {
+                    pendingDrmType = if (v.contains("widevine", true)) "widevine" else if (v.contains("clearkey", true)) "clearkey" else v.lowercase()
+                } else if (k.endsWith("license_key")) {
+                    pendingDrmKey = v.substringBefore('|')
+                }
             } else if (line.startsWith("#EXTGRP:", ignoreCase = true)) {
                 pendingGroup = line.substringAfter(':').trim()
             } else if (!line.startsWith("#")) {
                 val name = pendingName?.takeIf { it.isNotBlank() } ?: line
-                result.add(Channel(name, line, pendingGroup, classify(line, pendingGroup, name), pendingId, pendingLogo))
+                var link = line
+                var ua = pendingUa
+                var ref = pendingRef
+                val bar = link.indexOf('|')
+                if (bar > 0 && link.startsWith("http", ignoreCase = true)) {
+                    for (pair in link.substring(bar + 1).split('&')) {
+                        val k = pair.substringBefore('=').lowercase()
+                        val v = urlDecode(pair.substringAfter('=', ""))
+                        if (k == "user-agent") ua = v else if (k == "referer" || k == "referrer") ref = v
+                    }
+                    link = link.substring(0, bar)
+                }
+                val sid = Regex("""/live/[^/]+/[^/]+/(\d+)\.""").find(link)?.groupValues?.get(1) ?: ""
+                result.add(
+                    Channel(
+                        name, link, pendingGroup, classify(link, pendingGroup, name), pendingId, pendingLogo,
+                        sid, pendingArchive, ua, ref, pendingDrmType, pendingDrmKey, pendingCatchupSrc
+                    )
+                )
+                pendingUa = ""; pendingRef = ""; pendingDrmType = ""; pendingDrmKey = ""
+                pendingArchive = 0; pendingCatchupSrc = ""
                 pendingName = null
                 pendingGroup = ""
                 pendingId = ""

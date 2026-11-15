@@ -3,6 +3,8 @@ package de.dj64.tv
 import android.content.Context
 import java.net.URLEncoder
 
+class Xt(val base: String, val user: String, val pass: String)
+
 class Store(context: Context) {
     private val p = context.getSharedPreferences("dj64", Context.MODE_PRIVATE)
     private val pp = context.getSharedPreferences("dj64pos", Context.MODE_PRIVATE)
@@ -84,20 +86,20 @@ class Store(context: Context) {
 
     // ---- Zugangsdaten
     var url: String // M3U-Wiedergabeliste
-        get() = str(k("url")).ifBlank { if (activeProfile == 0) Config.DEFAULT_PLAYLIST_URL else "" }
-        set(value) = put(k("url"), value)
+        get() = Crypt.dec(str(k("url"))).ifBlank { if (activeProfile == 0) Config.DEFAULT_PLAYLIST_URL else "" }
+        set(value) = put(k("url"), Crypt.enc(value))
     var server: String
-        get() = str(k("server"))
-        set(value) = put(k("server"), value)
+        get() = Crypt.dec(str(k("server")))
+        set(value) = put(k("server"), Crypt.enc(value))
     var user: String
-        get() = str(k("user"))
-        set(value) = put(k("user"), value)
+        get() = Crypt.dec(str(k("user")))
+        set(value) = put(k("user"), Crypt.enc(value))
     var pass: String
-        get() = str(k("pass"))
-        set(value) = put(k("pass"), value)
+        get() = Crypt.dec(str(k("pass")))
+        set(value) = put(k("pass"), Crypt.enc(value))
     var epgManual: String
-        get() = str(k("epg"))
-        set(value) = put(k("epg"), value)
+        get() = Crypt.dec(str(k("epg")))
+        set(value) = put(k("epg"), Crypt.enc(value))
 
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
@@ -108,6 +110,35 @@ class Store(context: Context) {
     }
 
     fun usesXtream(): Boolean = xtreamBase() != null
+
+    fun xtream(): Xt? {
+        val b = xtreamBase() ?: return null
+        return Xt(b, user.trim(), pass)
+    }
+
+    /** Verschlüsselt vorhandene Klartext-Zugangsdaten aller Profile. */
+    fun migrateSecrets() {
+        val e = p.edit()
+        for ((id, _) in profiles()) {
+            for (base in listOf("url", "server", "user", "pass", "epg")) {
+                val kk = key(id, base)
+                val v = p.getString(kk, null)
+                if (!v.isNullOrEmpty() && !v.startsWith("enc:")) e.putString(kk, Crypt.enc(v))
+            }
+        }
+        e.apply()
+    }
+
+    fun pinSalt(): String {
+        var s = str("pinSalt")
+        if (s.isEmpty()) {
+            val b = ByteArray(16)
+            java.security.SecureRandom().nextBytes(b)
+            s = b.joinToString("") { "%02x".format(it) }
+            put("pinSalt", s)
+        }
+        return s
+    }
 
     fun playlistUrl(): String {
         val base = xtreamBase()

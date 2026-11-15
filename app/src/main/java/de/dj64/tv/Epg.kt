@@ -33,6 +33,12 @@ class Epg(
         return Pair(cur, next)
     }
 
+    fun past(c: Channel, now: Long, days: Int): List<Prog> {
+        val l = listFor(c) ?: return emptyList()
+        val from = now - days * 86_400_000L
+        return l.filter { it.stop <= now && it.start >= from }.reversed()
+    }
+
     fun upcoming(c: Channel, now: Long, n: Int): Pair<Prog?, List<Prog>> {
         val l = listFor(c) ?: return Pair(null, emptyList())
         val cur = l.firstOrNull { it.start <= now && now < it.stop }
@@ -43,7 +49,14 @@ class Epg(
     companion object {
         fun norm(s: String): String = s.lowercase().filter { it.isLetterOrDigit() }
 
-        fun load(raw: InputStream, now: Long): Epg {
+        fun load(
+            raw: InputStream, now: Long,
+            liveIds: Set<String> = emptySet(), liveNames: Set<String> = emptySet(),
+            arcIds: Set<String> = emptySet(), arcNames: Set<String> = emptySet()
+        ): Epg {
+            val filter = liveIds.isNotEmpty() || liveNames.isNotEmpty()
+            val wanted = HashSet<String>()
+            val wantedArc = HashSet<String>()
             val buf = BufferedInputStream(raw, 65536)
             buf.mark(4)
             val b1 = buf.read()
@@ -71,8 +84,9 @@ class Epg(
                 }
             }
 
-            val from = now - 2 * 3600_000L
-            val to = now + 24 * 3600_000L
+            val fromShort = now - 2 * 3600_000L
+            val fromArc = now - 7 * 86_400_000L
+            val to = now + 36 * 3600_000L
 
             var channelId: String? = null
             var progChannel: String? = null
@@ -89,6 +103,10 @@ class Epg(
                         tag = parser.name
                         if (tag == "channel") {
                             channelId = parser.getAttributeValue(null, "id")
+                            channelId?.let { id ->
+                                if (id in liveIds) wanted.add(id)
+                                if (id in arcIds) wantedArc.add(id)
+                            }
                         } else if (tag == "programme") {
                             progChannel = parser.getAttributeValue(null, "channel")
                             progStart = time(parser.getAttributeValue(null, "start"))
@@ -103,6 +121,8 @@ class Epg(
                         if (tag == "display-name" && cid != null) {
                             val key = norm(txt)
                             if (key.isNotEmpty() && !nameToId.containsKey(key)) nameToId[key] = cid
+                            if (key in liveNames) wanted.add(cid)
+                            if (key in arcNames) wantedArc.add(cid)
                         } else if (tag == "title" && progChannel != null && progTitle == null) {
                             progTitle = txt.trim()
                         } else if (tag == "desc" && progChannel != null && progDesc.isEmpty()) {
@@ -116,7 +136,8 @@ class Epg(
                         } else if (name == "programme") {
                             val ch = progChannel
                             val title = progTitle
-                            if (ch != null && title != null && progStop > from && progStart < to) {
+                            val from = if (ch != null && ch in wantedArc) fromArc else fromShort
+                            if (ch != null && title != null && progStop > from && progStart < to && (!filter || ch in wanted)) {
                                 byId.getOrPut(ch) { ArrayList() }.add(Prog(progStart, progStop, title, progDesc))
                             }
                             progChannel = null

@@ -1,7 +1,7 @@
 {
   "name": "dj64-windows",
   "productName": "DJ64",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "DJ64 IPTV Player für Windows",
   "main": "main.js",
   "author": "DJ64",

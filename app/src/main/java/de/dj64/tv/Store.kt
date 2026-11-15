@@ -51,6 +51,17 @@ class Store(context: Context) {
         if (activeProfile == id) activeProfile = l[0].first
     }
 
+    // ---- Kennung gegenüber dem Anbieter (User-Agent)
+    var uaMode: Int // 0 VLC, 1 DJ64, 2 Chrome
+        get() = p.getInt("uaMode", 0)
+        set(value) = p.edit().putInt("uaMode", value).apply()
+
+    fun userAgent(mode: Int = uaMode): String = when (mode) {
+        1 -> "DJ64/1.8"
+        2 -> "Mozilla/5.0 (Linux; Android 11; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        else -> "VLC/3.0.20 LibVLC/3.0.20"
+    }
+
     // ---- Film/Serie: Spulen und Fortsetzen
     var fwdSec: Int
         get() = p.getInt("fwd", p.getInt("seek", 10))
@@ -87,7 +98,7 @@ class Store(context: Context) {
     // ---- Zugangsdaten
     var url: String // M3U-Wiedergabeliste
         get() = Crypt.dec(str(k("url"))).ifBlank { if (activeProfile == 0) Config.DEFAULT_PLAYLIST_URL else "" }
-        set(value) = put(k("url"), Crypt.enc(value))
+        set(value) = put(k("url"), Crypt.enc(value.filter { !it.isWhitespace() }))
     var server: String
         get() = Crypt.dec(str(k("server")))
         set(value) = put(k("server"), Crypt.enc(value))

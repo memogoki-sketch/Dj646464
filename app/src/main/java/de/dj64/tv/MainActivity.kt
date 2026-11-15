@@ -103,6 +103,7 @@ class MainActivity : Activity() {
     private val resizeNames = listOf("Anpassen (Original-Format)", "Gestreckt (Vollbild)", "Zoom (Ränder abschneiden)")
     private val seekChoices = listOf(5, 10, 15, 20, 30, 60, 120, 300, 600)
     private var resumeAt = 0L
+    private val uaNames = arrayOf("VLC (empfohlen)", "DJ64", "Browser (Chrome)")
     private var httpFactory: DefaultHttpDataSource.Factory? = null
     private val xepCache = HashMap<String, List<Channel>>()
     private var archiveBack: Pair<Int, Int>? = null
@@ -1065,7 +1066,7 @@ class MainActivity : Activity() {
                 st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
                 st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.7") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.8") { showInfo() }
             )
         )
         grid.addView(
@@ -1792,7 +1793,8 @@ class MainActivity : Activity() {
             "Senderlogos laden: ${onOff(store.logos)}",
             "Programmführer automatisch laden: ${onOff(store.epgAuto)}",
             "Startanimation: ${introNames[store.introMode.coerceIn(0, 2)]}",
-            "Startanimation jetzt ansehen"
+            "Startanimation jetzt ansehen",
+            "Kennung gegenüber dem Anbieter: ${uaNames[store.uaMode.coerceIn(0, 2)]}"
         )
         AlertDialog.Builder(this)
             .setTitle("Leistung")
@@ -1806,6 +1808,7 @@ class MainActivity : Activity() {
                     5 -> { store.logos = !store.logos; perfMenu() }
                     6 -> { store.epgAuto = !store.epgAuto; perfMenu() }
                     7 -> choose("Startanimation", introNames, store.introMode) { store.introMode = it }
+                    9 -> choose("Kennung gegenüber dem Anbieter", uaNames, store.uaMode) { store.uaMode = it }
                     8 -> {
                         val keep = store.introMode
                         if (keep == 2) store.introMode = 0
@@ -2399,7 +2402,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.7")
+            .setTitle("DJ64 1.8")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -2462,26 +2465,41 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Öffnet eine Adresse. Manche Anbieter sperren unbekannte Programme (seltsame Codes wie 884):
+     * erst als VLC melden, bei HTTP-Fehlern die anderen Kennungen probieren und die passende merken.
+     */
     private fun openStream(urlStr: String): InputStream {
-        var current = urlStr
-        var redirects = 0
-        while (true) {
-            val c = URL(current).openConnection() as HttpURLConnection
-            c.connectTimeout = 15000
-            c.readTimeout = 60000
-            c.instanceFollowRedirects = false
-            c.setRequestProperty("User-Agent", "DJ64/1.3")
-            val code = c.responseCode
-            if (code in 300..399 && redirects < 5) {
-                val loc = c.getHeaderField("Location") ?: throw IOException("Weiterleitung ohne Ziel")
-                current = URL(URL(current), loc).toString()
+        val clean = urlStr.filter { !it.isWhitespace() }
+        var lastCode = 0
+        for (k in 0 until 3) {
+            val mode = (store.uaMode + k) % 3
+            var current = clean
+            var redirects = 0
+            while (true) {
+                val c = URL(current).openConnection() as HttpURLConnection
+                c.connectTimeout = 15000
+                c.readTimeout = 60000
+                c.instanceFollowRedirects = false
+                c.setRequestProperty("User-Agent", store.userAgent(mode))
+                val code = c.responseCode
+                if (code in 300..399 && redirects < 5) {
+                    val loc = c.getHeaderField("Location") ?: throw IOException("Weiterleitung ohne Ziel")
+                    current = URL(URL(current), loc).toString()
+                    c.disconnect()
+                    redirects++
+                    continue
+                }
+                if (code in 200..299) {
+                    if (mode != store.uaMode) store.uaMode = mode
+                    return c.inputStream
+                }
+                lastCode = code
                 c.disconnect()
-                redirects++
-                continue
+                break
             }
-            if (code !in 200..299) throw IOException("HTTP $code")
-            return c.inputStream
         }
+        throw IOException("HTTP $lastCode – der Anbieter lehnt die Anfrage ab (Konto abgelaufen, zu viele gleichzeitige Verbindungen, IP gesperrt oder falsche Zugangsdaten)")
     }
 
     // ---------------------------------------------------------------- Player
@@ -2489,7 +2507,7 @@ class MainActivity : Activity() {
     private fun initPlayer() {
         if (player != null) return
         val dataSource = DefaultHttpDataSource.Factory().also { httpFactory = it }
-            .setUserAgent("DJ64/1.7")
+            .setUserAgent(store.userAgent())
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
@@ -2568,7 +2586,7 @@ class MainActivity : Activity() {
         handler.removeCallbacks(retryRunnable)
         val startAt = if (ch.kind != Kind.LIVE) resumeAt else 0L
         resumeAt = 0L
-        httpFactory?.setUserAgent(ch.ua.ifBlank { "DJ64/1.7" })
+        httpFactory?.setUserAgent(ch.ua.ifBlank { store.userAgent() })
         httpFactory?.setDefaultRequestProperties(if (ch.referer.isNotBlank()) mapOf("Referer" to ch.referer) else emptyMap())
         val item = buildItem(ch)
         if (startAt > 0) p.setMediaItem(item, startAt) else p.setMediaItem(item)

@@ -34,7 +34,7 @@ app.on('second-instance', () => {
 
 // ---------------------------------------------------------------- Netzwerk
 
-function request(url, headers = {}, redirects = 0) {
+function request1(url, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     let u;
     try {
@@ -46,7 +46,7 @@ function request(url, headers = {}, redirects = 0) {
     const req = lib.get(u, { headers: Object.assign({ 'User-Agent': 'DJ64/1.4' }, headers), timeout: 30000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 5) {
         res.resume();
-        resolve(request(new URL(res.headers.location, u).toString(), headers, redirects + 1));
+        resolve(request1(new URL(res.headers.location, u).toString(), headers, redirects + 1));
         return;
       }
       if (res.statusCode === 304) {
@@ -75,6 +75,30 @@ function request(url, headers = {}, redirects = 0) {
     req.on('timeout', () => req.destroy(new Error('Zeitüberschreitung')));
     req.on('error', reject);
   });
+}
+
+// Manche Anbieter sperren unbekannte Programme (z. B. mit seltsamen Codes wie 884).
+// Darum: erst als VLC melden, bei HTTP-Fehlern die anderen Kennungen probieren und die passende merken.
+const VLC_UA = 'VLC/3.0.20 LibVLC/3.0.20';
+const UAS = [VLC_UA, 'DJ64/1.5', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'];
+let uaPref = 0;
+async function request(url, headers = {}) {
+  url = String(url).replace(/\s+/g, '');
+  if (headers['User-Agent']) return request1(url, headers);
+  let last = null;
+  for (let k = 0; k < UAS.length; k++) {
+    const i = (uaPref + k) % UAS.length;
+    try {
+      const r = await request1(url, Object.assign({}, headers, { 'User-Agent': UAS[i] }));
+      uaPref = i;
+      return r;
+    } catch (e) {
+      last = e;
+      if (!/^HTTP \d+/.test(e.message || '')) throw e;
+    }
+  }
+  const code = (last.message.match(/\d+/) || [''])[0];
+  throw new Error(`${last.message} – der Anbieter lehnt die Anfrage ab (Konto abgelaufen, zu viele gleichzeitige Verbindungen, IP gesperrt oder falsche Zugangsdaten${code ? ', Code ' + code : ''})`);
 }
 
 async function getBuffer(url) {
@@ -179,7 +203,12 @@ function originOf(u) {
 function installHeaderHook() {
   session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['http://*/*', 'https://*/*'] }, (details, cb) => {
     const r = headerRules.size ? headerRules.get(originOf(details.url)) : null;
-    if (!r) { cb({ requestHeaders: details.requestHeaders }); return; }
+    if (!r) {
+      const h0 = Object.assign({}, details.requestHeaders);
+      h0['User-Agent'] = UAS[uaPref];
+      cb({ requestHeaders: h0 });
+      return;
+    }
     const h = Object.assign({}, details.requestHeaders);
     if (r.ua) h['User-Agent'] = r.ua;
     if (r.ref) h.Referer = r.ref;

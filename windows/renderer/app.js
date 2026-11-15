@@ -17,7 +17,39 @@ const errMsg = (e) => String((e && e.message) || e).replace(/^Error invoking rem
 /* ---------------- Einstellungen (localStorage) ---------------- */
 
 // Profile (Kunden): diese Schlüssel gelten je Profil (Profil 0 ohne Präfix, sonst p<id>_).
-const PK = new Set(['url', 'server', 'user', 'pass', 'epg', 'fav', 'hidden', 'recent', 'last', 'resume']);
+const PK = new Set(['url', 'server', 'user', 'pass', 'epg', 'fav', 'hidden', 'recent', 'last', 'resume', 'xeps']);
+// Zugangsdaten werden mit Windows-DPAPI (Electron safeStorage) verschlüsselt abgelegt: 'enc:<base64>'.
+const SECRET = new Set(['url', 'server', 'user', 'pass', 'epg']);
+const secCache = new Map();
+function secDec(v) {
+  if (typeof v !== 'string' || !v.startsWith('enc:')) return v;
+  if (secCache.has(v)) return secCache.get(v);
+  let plain = null;
+  try { if (window.api.decSync) plain = window.api.decSync(v); } catch (e) { plain = null; }
+  if (plain !== null && plain !== undefined) secCache.set(v, plain);
+  return plain === undefined ? null : plain;
+}
+function secEnc(text) {
+  try {
+    const e = window.api.encSync ? window.api.encSync(text) : null;
+    if (e) { secCache.set(e, text); return e; }
+  } catch (e) { /* kein Schlüsselspeicher: Klartext */ }
+  return text;
+}
+/** Vorhandene Klartextwerte beim Start verschlüsselt zurückschreiben. */
+function migrateSecrets() {
+  try {
+    const re = /^dj64\.(?:p\d+_)?(url|server|user|pass|epg)$/;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!re.test(key)) continue;
+      const v = localStorage.getItem(key);
+      if (v === null || v === '""' || v.startsWith('enc:')) continue;
+      const e = secEnc(v);
+      if (e !== v) localStorage.setItem(key, e);
+    }
+  } catch (e) { /* egal */ }
+}
 let PID = (() => {
   try { return Number(JSON.parse(localStorage.getItem('dj64.profile'))) || 0; } catch (e) { return 0; }
 })();
@@ -27,14 +59,21 @@ const S = {
   get(k, d) {
     try {
       const v = localStorage.getItem('dj64.' + pk(k));
-      return v === null ? d : JSON.parse(v);
+      if (v === null) return d;
+      if (SECRET.has(k)) {
+        const plain = secDec(v);
+        return plain === null ? d : JSON.parse(plain);
+      }
+      return JSON.parse(v);
     } catch (e) {
       return d;
     }
   },
   set(k, v) {
     try {
-      localStorage.setItem('dj64.' + pk(k), JSON.stringify(v));
+      let raw = JSON.stringify(v);
+      if (SECRET.has(k) && raw !== '""') raw = secEnc(raw);
+      localStorage.setItem('dj64.' + pk(k), raw);
     } catch (e) { /* voll oder gesperrt */ }
   },
   del(k) {
@@ -181,53 +220,186 @@ function parseEpisode(name) {
   return { sTitle: m[1].trim(), season: +(m[2] || m[4]), ep: +(m[3] || m[5]) };
 }
 
-function attr(line, name) {
+function attrsOf(line) {
+  const o = {};
   const re = /([\w-]+)="([^"]*)"/g;
   let m;
-  while ((m = re.exec(line))) {
-    if (m[1].toLowerCase() === name) return m[2];
-  }
-  return '';
+  while ((m = re.exec(line))) o[m[1].toLowerCase()] = m[2];
+  return o;
 }
 
-function parseM3u(text) {
-  const channels = [];
-  let name = null;
-  let group = '';
-  let tvgId = '';
-  let logo = '';
-  let epg = '';
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim().replace(/^﻿/, '');
-    if (!line) continue;
-    const up = line.slice(0, 8).toUpperCase();
+function m3uNew() {
+  return { channels: [], epg: '', name: null, group: '', tvgId: '', logo: '', arch: 0, csrc: '', ctype: '', ua: '', ref: '', drm: false };
+}
+
+function parseHeaderPairs(str, c) {
+  for (const part of str.split('&')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const k = part.slice(0, i).toLowerCase();
+    let v = part.slice(i + 1);
+    try { v = decodeURIComponent(v); } catch (e) { /* roh lassen */ }
+    if (k === 'user-agent') c.ua = v;
+    else if (k === 'referer' || k === 'referrer') c.ref = v;
+  }
+}
+
+const XT_LIVE = /\/live\/[^/]+\/[^/]+\/(\d+)\.(?:ts|m3u8)(?:\?|$)/;
+
+function m3uLine(c, raw) {
+  let line = raw.trim();
+  if (!line) return;
+  if (line.charCodeAt(0) === 0xfeff) line = line.slice(1);
+  if (line[0] === '#') {
+    const up = line.slice(0, 12).toUpperCase();
     if (up.startsWith('#EXTM3U')) {
-      epg = (attr(line, 'url-tvg') || attr(line, 'x-tvg-url')).split(',')[0];
+      const a = attrsOf(line);
+      c.epg = (a['url-tvg'] || a['x-tvg-url'] || '').split(',')[0];
     } else if (up.startsWith('#EXTINF')) {
       const lastQuote = line.lastIndexOf('"');
       const comma = line.indexOf(',', lastQuote >= 0 ? lastQuote : 0);
-      name = comma >= 0 ? line.slice(comma + 1).trim() : '';
-      group = attr(line, 'group-title');
-      tvgId = attr(line, 'tvg-id');
-      logo = attr(line, 'tvg-logo');
+      c.name = comma >= 0 ? line.slice(comma + 1).trim() : '';
+      const a = attrsOf(line);
+      c.group = a['group-title'] || '';
+      c.tvgId = a['tvg-id'] || '';
+      c.logo = a['tvg-logo'] || '';
+      const days = parseInt(a['catchup-days'] || a['tvg-rec'] || '', 10);
+      c.arch = days > 0 ? days : (a.catchup || a['catchup-source']) ? 7 : 0;
+      c.csrc = a['catchup-source'] || '';
+      c.ctype = a.catchup || '';
     } else if (up.startsWith('#EXTGRP')) {
-      group = line.slice(line.indexOf(':') + 1).trim();
-    } else if (!line.startsWith('#')) {
-      const nm = name || line;
-      const kind = classify(line, group, nm);
-      const ch = { name: nm, url: line, group, kind, tvgId, logo };
-      if (kind === 'series') {
-        const e = parseEpisode(nm);
-        if (e) Object.assign(ch, e);
+      c.group = line.slice(line.indexOf(':') + 1).trim();
+    } else if (up.startsWith('#EXTVLCOPT')) {
+      const kv = line.slice(line.indexOf(':') + 1);
+      const i = kv.indexOf('=');
+      if (i > 0) {
+        const k = kv.slice(0, i).toLowerCase();
+        const v = kv.slice(i + 1).trim();
+        if (k === 'http-user-agent') c.ua = v;
+        else if (k === 'http-referrer' || k === 'http-referer') c.ref = v;
       }
-      channels.push(ch);
-      name = null;
-      group = '';
-      tvgId = '';
-      logo = '';
+    } else if (up.startsWith('#KODIPROP')) {
+      const kv = line.slice(line.indexOf(':') + 1);
+      const i = kv.indexOf('=');
+      if (i > 0) {
+        const k = kv.slice(0, i).toLowerCase();
+        const v = kv.slice(i + 1).trim();
+        if (k.endsWith('license_key') && v) c.drm = true;
+        else if (k.endsWith('stream_headers')) parseHeaderPairs(v, c);
+      }
+    }
+    return;
+  }
+  let url = line;
+  const bar = url.indexOf('|');
+  if (bar > 0 && /^(user-agent|referer|referrer|origin|cookie)=/i.test(url.slice(bar + 1))) {
+    parseHeaderPairs(url.slice(bar + 1), c);
+    url = url.slice(0, bar);
+  }
+  const nm = c.name || url;
+  const kind = classify(url, c.group, nm);
+  const ch = { name: nm, url, group: c.group, kind, tvgId: c.tvgId, logo: c.logo };
+  if (kind === 'series') {
+    const e = parseEpisode(nm);
+    if (e) Object.assign(ch, e);
+  }
+  if (kind === 'live') {
+    const m = XT_LIVE.exec(url);
+    if (c.arch > 0) ch.arch = c.arch;
+    else if (m) ch.arch = 3; // Xtream-Muster: Archiv wird angenommen (3 Tage)
+    if (m) ch.sid = m[1];
+    if (c.csrc) ch.csrc = c.csrc;
+    if (c.ctype) ch.ctype = c.ctype;
+  }
+  if (c.ua) ch.ua = c.ua;
+  if (c.ref) ch.ref = c.ref;
+  if (c.drm || /\.mpd(\?|$)/i.test(url) && c.drm) ch.drm = true;
+  c.channels.push(ch);
+  c.name = null;
+  c.group = '';
+  c.tvgId = '';
+  c.logo = '';
+  c.arch = 0;
+  c.csrc = '';
+  c.ctype = '';
+  c.ua = '';
+  c.ref = '';
+  c.drm = false;
+}
+
+function parseM3u(text) {
+  const c = m3uNew();
+  let pos = 0;
+  const len = text.length;
+  while (pos < len) {
+    let nl = text.indexOf('\n', pos);
+    if (nl < 0) nl = len;
+    m3uLine(c, text.slice(pos, nl));
+    pos = nl + 1;
+  }
+  return { channels: c.channels, epg: c.epg };
+}
+
+/** Wie parseM3u, gibt aber alle ~12 ms die Hauptschleife frei, damit die Oberfläche bei großen Listen nicht hängt. */
+async function parseM3uAsync(text) {
+  const c = m3uNew();
+  let pos = 0;
+  const len = text.length;
+  let t0 = performance.now();
+  while (pos < len) {
+    let nl = text.indexOf('\n', pos);
+    if (nl < 0) nl = len;
+    m3uLine(c, text.slice(pos, nl));
+    pos = nl + 1;
+    if (performance.now() - t0 > 12) {
+      await new Promise((r) => setTimeout(r, 0));
+      t0 = performance.now();
     }
   }
-  return { channels, epg };
+  return { channels: c.channels, epg: c.epg };
+}
+
+/* Kompakter JSON-Zwischenspeicher: spart beim Start das erneute Zerlegen der Playlist. */
+const KINDS = ['live', 'movie', 'series'];
+const EXTRA = ['sTitle', 'season', 'ep', 'arch', 'sid', 'ua', 'ref', 'drm', 'apiSeries', 'csrc', 'ctype'];
+
+function hydrate(ch) {
+  if (ch.apiSeries) {
+    ch.folder = true;
+    ch.lazy = true;
+    ch.title = ch.name;
+    ch.eps = [];
+    ch.seasons = 0;
+  }
+  return ch;
+}
+
+function packPlaylist(pl) {
+  const c = pl.channels.map((ch) => {
+    const a = [ch.name, ch.url, ch.group || '', KINDS.indexOf(ch.kind), ch.tvgId || '', ch.logo || ''];
+    let x = null;
+    for (const k of EXTRA) {
+      const v = ch[k];
+      if (v !== undefined && v !== '' && v !== false && v !== 0) (x || (x = {}))[k] = v;
+    }
+    if (x) a.push(x);
+    return a;
+  });
+  return JSON.stringify({ v: 2, epg: pl.epg || '', c });
+}
+
+function unpackPlaylist(j) {
+  const channels = j.c.map((a) => {
+    const ch = { name: a[0], url: a[1], group: a[2], kind: KINDS[a[3]] || 'live', tvgId: a[4], logo: a[5] };
+    if (a[6]) Object.assign(ch, a[6]);
+    return hydrate(ch);
+  });
+  return { channels, epg: j.epg || '' };
+}
+
+async function loadCached(text) {
+  if (text && text[0] === '{') return unpackPlaylist(JSON.parse(text));
+  return parseM3uAsync(text);
 }
 
 function setPlaylist(pl) {
@@ -246,6 +418,23 @@ function setPlaylist(pl) {
   state.byUrl = byUrl;
   state.sorted = {};
   lockCache.clear();
+  xepsCache = null;
+  for (const e of Object.values(xeps())) byUrl.set(e.url, e);
+}
+
+// Folgen aus der Xtream-API, die als Favorit oder zuletzt gesehen gemerkt sind (nicht in der Playlist enthalten)
+let xepsCache = null;
+const xeps = () => xepsCache || (xepsCache = S.get('xeps', {}));
+function rememberEp(ch) {
+  if (!ch || !ch.epApi) return;
+  const m = Object.assign({}, S.get('xeps', {}));
+  delete m[ch.url];
+  m[ch.url] = ch;
+  const keys = Object.keys(m);
+  if (keys.length > 100) keys.slice(0, keys.length - 100).forEach((k) => delete m[k]);
+  S.set('xeps', m);
+  xepsCache = null;
+  if (state.byUrl) state.byUrl.set(ch.url, ch);
 }
 
 const groupOf = (c) => c.group || 'Ohne Kategorie';
@@ -336,7 +525,29 @@ function sha256(str) {
   }
   return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
 }
-const pinHash = (pin) => sha256('dj64' + pin);
+function pcSalt() {
+  let salt = '';
+  try { salt = localStorage.getItem('dj64.pc.salt') || ''; } catch (e) { salt = ''; }
+  if (!salt) {
+    const a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    salt = [...a].map((x) => x.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('dj64.pc.salt', salt); } catch (e) { /* egal */ }
+  }
+  return salt;
+}
+const pinHash = (pin) => sha256(pcSalt() + ':' + pin);
+/** Prüft die PIN; ein alter Hash (fester Salzwert) wird beim ersten richtigen Eingeben migriert. */
+function pinOk(pin) {
+  const h = S.get('pc.hash', '');
+  if (S.get('pc.v', 1) >= 2) return pinHash(pin) === h;
+  if (sha256('dj64' + pin) === h) {
+    S.set('pc.hash', pinHash(pin));
+    S.set('pc.v', 2);
+    return true;
+  }
+  return false;
+}
 
 function unlockNow() {
   state.unlockUntil = Date.now() + 30 * 60e3;
@@ -366,7 +577,7 @@ function askPin(title, onOk) {
           const msg = $('#pinmsg', m);
           const wait = pinWaitSec();
           if (wait > 0) { msg.textContent = `Zu viele Versuche. Bitte ${wait} Sekunden warten.`; return false; }
-          if (pinHash(inp.value) === S.get('pc.hash', '')) {
+          if (pinOk(inp.value)) {
             S.set('pc.fail', 0);
             setTimeout(onOk, 0);
             return undefined;
@@ -414,6 +625,7 @@ function setPinDialog(onOk) {
           if (!/^\d{4,6}$/.test(a)) { msg.textContent = 'Die PIN braucht 4 bis 6 Ziffern.'; return false; }
           if (a !== b) { msg.textContent = 'Die beiden Eingaben sind verschieden.'; return false; }
           S.set('pc.hash', pinHash(a));
+          S.set('pc.v', 2);
           S.set('pc.on', true);
           S.set('pc.fail', 0);
           pcChanged();
@@ -512,6 +724,7 @@ function folderize(items) {
 
 function pushRecent(ch) {
   if (!ch || ch.folder) return;
+  rememberEp(ch);
   const r = S.get('recent', []).filter((u) => u !== ch.url);
   r.unshift(ch.url);
   S.set('recent', r.slice(0, 30));
@@ -555,6 +768,26 @@ function upcoming(ch, now, n) {
 
 const hm = (ms) => new Date(ms).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 
+let epgOptsFor = null;
+let epgOptsVal = null;
+/** Welche Sender der Playlist der EPG-Parser behalten soll (und für welche das Archiv gilt). */
+function epgOpts() {
+  if (epgOptsFor === state.channels && epgOptsVal) return epgOptsVal;
+  const ids = new Set();
+  const names = new Set();
+  const aIds = new Set();
+  const aNames = new Set();
+  for (const c of (state.index && state.index.live) || []) {
+    const vs = [c.name, c.name.replace(/^[^:]*:\s*/, ''), c.name.replace(/\b(hd|fhd|uhd|4k|sd|raw)\b/gi, '')].map(normName).filter(Boolean);
+    const arch = c.arch > 0 || !!c.csrc;
+    if (c.tvgId) { ids.add(c.tvgId); if (arch) aIds.add(c.tvgId); }
+    for (const v of vs) { names.add(v); if (arch) aNames.add(v); }
+  }
+  epgOptsFor = state.channels;
+  epgOptsVal = { ids: [...ids], names: [...names], arch: { ids: [...aIds], names: [...aNames] } };
+  return epgOptsVal;
+}
+
 async function loadEpg(verbose) {
   const pid = PID;
   const url = epgUrl();
@@ -565,7 +798,7 @@ async function loadEpg(verbose) {
   }
   if (verbose) toast('EPG wird geladen …', 0);
   try {
-    const res = await window.api.loadEpg(url);
+    const res = await window.api.loadEpg(url, Object.assign({ pid }, epgOpts()));
     if (pid !== PID) return;
     state.epg = res;
     const n = Object.keys(state.epg.channels).length;
@@ -900,6 +1133,7 @@ async function switchProfile(id) {
   PID = id;
   localStorage.setItem('dj64.profile', JSON.stringify(id));
   favCache = null;
+  xepsCache = null;
   state.epg = null;
   state.folder = null;
   state.query = '';
@@ -910,7 +1144,7 @@ async function switchProfile(id) {
   try {
     const cached = await window.api.cacheRead(id);
     if (my === profileBusy && cached) {
-      setPlaylist(parseM3u(cached));
+      setPlaylist(await loadCached(cached));
       if (state.screen === 'home') renderHome();
     }
   } catch (e) { /* kein Cache */ }
@@ -1011,7 +1245,7 @@ function showVodSettings() {
 // Fortsetzen: Position je Adresse merken
 function saveResume() {
   const ch = cur;
-  if (!ch || ch.kind === 'live') return;
+  if (!ch || ch.kind === 'live' || ch.archive) return;
   const d = video.duration;
   const t = video.currentTime;
   if (!isFinite(d) || d <= 0 || !isFinite(t) || t < 1) return;
@@ -1393,6 +1627,7 @@ function buildCats() {
     nAll += unit;
     if (favs.has(c.url)) nFav++;
   }
+  if (kind === 'series') nFav += Object.values(xeps()).filter((e) => favs.has(e.url)).length;
   let groups = [...counts.keys()];
   if (sortMode() === 1) {
     groups.sort((a, b) => {
@@ -1420,7 +1655,8 @@ function chanRow(c, i) {
   let name = c.name;
   if (c.folder) {
     name = c.title;
-    sub = `${c.eps.length} ${c.eps.length === 1 ? 'Folge' : 'Folgen'} · ${c.seasons} ${c.seasons === 1 ? 'Staffel' : 'Staffeln'}`;
+    if (c.lazy && !c.loaded) sub = 'Serie · Enter öffnet die Folgen';
+    else sub = `${c.eps.length} ${c.eps.length === 1 ? 'Folge' : 'Folgen'} · ${c.seasons} ${c.seasons === 1 ? 'Staffel' : 'Staffeln'}`;
   } else if (state.folder && c.sTitle !== undefined) {
     sub = `Staffel ${c.season} · Folge ${c.ep}`;
   } else if (c.kind === 'live' && state.epg) {
@@ -1466,7 +1702,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
         <div class="pdesc" id="pd"></div><div class="pnext" id="px"></div>
       </div>` : ''}
     </div>
-    <div class="hint">Enter oder Doppelklick = Abspielen / Ordner öffnen  ·  F oder Rechtsklick = Favorit  ·  Esc = zurück</div>`;
+    <div class="hint">Enter oder Doppelklick = Abspielen / Ordner öffnen  ·  F = Favorit  ·  Rechtsklick, C oder Enter lang = Menü (Favorit, Sendungsarchiv)  ·  Esc = zurück</div>`;
 
   state.cats = buildCats();
   const hasAny = visibleOfKind(kind).length > 0;
@@ -1484,7 +1720,7 @@ function showBrowse(kind, cat = 0, query = '', opts = {}) {
   catList.onClick = (i) => { selectCat(i); enterCat(); };
   chanList.onClick = (i) => { setZone('list'); selectItem(i, false); };
   chanList.onDbl = (i) => { playFull(i); };
-  chanList.onCtx = (i) => { toggleFav(state.items[i]); };
+  chanList.onCtx = (i) => { state.sel = i; chanList.select(i, false); showCtx(i); };
 
   const slot = $('#slot');
   if (slot) new ResizeObserver(() => placePlayer()).observe(slot);
@@ -1509,6 +1745,7 @@ function fillItems(sel = 0) {
   else if (cat.type === 'fav') {
     const f = favSet();
     items = base.filter((c) => f.has(c.url) && free(c));
+    if (kind === 'series') items = items.concat(Object.values(xeps()).filter((e) => f.has(e.url) && free(e)));
   } else if (cat.type === 'recent') items = recentItems(kind);
   else if (cat.locked) { items = []; state.catLocked = true; } else items = base.filter((c) => groupOf(c) === cat.group && free(c));
   if (kind === 'series' && !state.folder && !q && (!cat || cat.type === 'all' || cat.type === 'group')) items = folderize(items);
@@ -1525,6 +1762,34 @@ function fillItems(sel = 0) {
   state.sel = Math.max(0, Math.min(sel, items.length - 1));
   chanList.select(items.length ? state.sel : -1);
   updatePane(items[state.sel]);
+}
+
+/** Folgen einer Xtream-Serie erst beim Öffnen laden (get_series_info). */
+async function loadSeriesFolder(f) {
+  if (f.loaded) return true;
+  const b = xtreamBase();
+  if (!b) { toast('Serien-Folgen brauchen den Xtream-Zugang', 3000); return false; }
+  const pid = PID;
+  toast('Folgen werden geladen …', 0);
+  try {
+    const eps = await window.api.xtreamSeries({ base: b, user: String(S.get('user', '')).trim(), pass: String(S.get('pass', '')), id: f.apiSeries, name: f.title });
+    if (pid !== PID) return false;
+    for (const e of eps) {
+      e.group = f.group;
+      if (!e.logo) e.logo = f.logo;
+      if (state.byUrl) state.byUrl.set(e.url, e);
+    }
+    eps.sort((x, y) => x.season - y.season || x.ep - y.ep);
+    f.eps = eps;
+    f.seas = new Set(eps.map((e) => e.season));
+    f.seasons = f.seas.size;
+    f.loaded = true;
+    toast(eps.length ? `${eps.length} Folgen` : 'Keine Folgen gefunden', 1500);
+    return eps.length > 0;
+  } catch (e) {
+    toast('Folgen konnten nicht geladen werden: ' + errMsg(e), 4000);
+    return false;
+  }
 }
 
 function openFolder(f, index) {
@@ -1589,6 +1854,7 @@ function toggleFav(ch) {
   if (f.has(ch.url)) { f.delete(ch.url); on = false; } else { f.add(ch.url); on = true; }
   S.set('fav', [...f]);
   favCache = null;
+  if (on) rememberEp(ch);
   toast(on ? '★ Favorit gespeichert' : 'Favorit entfernt', 1500);
   if (state.screen === 'browse' && chanList) {
     state.cats = buildCats();
@@ -1637,6 +1903,103 @@ function schedulePreview() {
     const ch = state.items[state.sel];
     if (ch && !ch.folder && !isBlocked(ch)) startStream(ch);
   }, PDELAYS[S.get('pdelay', 0)] * 1000);
+}
+
+/* ---------------- Catch-up / Sendungsarchiv ---------------- */
+
+const canArchive = (ch) => !!ch && !ch.folder && ch.kind === 'live' && (ch.arch > 0 || !!ch.csrc);
+const p2 = (n) => String(n).padStart(2, '0');
+
+/** Startzeit in der Zeitzone des Programmführers (Standard: Ortszeit des PCs). */
+function tsStamp(ms) {
+  const tz = state.epg && state.epg.tz !== null && state.epg.tz !== undefined ? state.epg.tz : -new Date(ms).getTimezoneOffset();
+  const d = new Date(ms + tz * 60000);
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}:${p2(d.getUTCHours())}-${p2(d.getUTCMinutes())}`;
+}
+
+function fillTemplate(tpl, start, stop) {
+  const d = new Date(start);
+  const now = Date.now();
+  const f = (pat) => pat.replace(/yyyy/g, d.getUTCFullYear()).replace(/MM/g, p2(d.getUTCMonth() + 1)).replace(/dd/g, p2(d.getUTCDate()))
+    .replace(/HH/g, p2(d.getUTCHours())).replace(/mm/g, p2(d.getUTCMinutes())).replace(/ss/g, p2(d.getUTCSeconds()));
+  return tpl
+    .replace(/\$\{\(b\)([^}:]*):utc\}/g, (_m, pat) => f(pat))
+    .replace(/\$?\{(?:utc|start)\}/g, Math.floor(start / 1000))
+    .replace(/\$?\{(?:utcend|end)\}/g, Math.floor(stop / 1000))
+    .replace(/\$?\{(?:lutc|timestamp)\}/g, Math.floor(now / 1000))
+    .replace(/\$?\{duration\}/g, Math.round((stop - start) / 1000))
+    .replace(/\$?\{offset\}/g, Math.floor((now - start) / 1000))
+    .replace(/\{Y\}/g, d.getUTCFullYear()).replace(/\{m\}/g, p2(d.getUTCMonth() + 1)).replace(/\{d\}/g, p2(d.getUTCDate()))
+    .replace(/\{H\}/g, p2(d.getUTCHours())).replace(/\{M\}/g, p2(d.getUTCMinutes())).replace(/\{S\}/g, p2(d.getUTCSeconds()));
+}
+
+function archiveUrl(ch, start, stop) {
+  if (ch.csrc || (ch.ctype && !/\/live\//.test(ch.url))) {
+    const src = ch.csrc ? fillTemplate(ch.csrc, start, stop) : fillTemplate('utc={utc}&lutc={lutc}', start, stop);
+    if (/^https?:/i.test(src)) return src;
+    if (ch.ctype === 'append' || src[0] === '?') return ch.url + src;
+    return ch.url + (ch.url.includes('?') ? '&' : '?') + src.replace(/^[?&]/, '');
+  }
+  const m = /^(.*)\/live\/([^/]+)\/([^/]+)\/(\d+)\.\w+(?:\?.*)?$/.exec(ch.url);
+  if (!m) return null;
+  const durMin = Math.max(1, Math.ceil((stop - start) / 60000));
+  return `${m[1]}/timeshift/${m[2]}/${m[3]}/${durMin}/${tsStamp(start)}/${m[4]}.ts`;
+}
+
+function playSynthetic(c) {
+  state.play = { list: [c], idx: 0 };
+  clearTimeout(previewTimer);
+  setFull(true);
+  startStream(c);
+  buildControls();
+  showControls();
+}
+
+function playArchive(ch, prog) {
+  const url = archiveUrl(ch, prog[0], prog[1]);
+  if (!url) { toast('Für diesen Sender ist kein Archiv möglich', 3000); return; }
+  playSynthetic({ name: `${ch.name} – ${prog[2]}`, url, kind: 'movie', group: ch.group, logo: ch.logo, tvgId: '', archive: true });
+}
+
+function watchFromStart(ch) {
+  const { cur: c } = upcoming(ch, Date.now(), 0);
+  if (!c) { toast('Keine Sendungsinfo für diesen Sender (EPG laden?)', 3500); return; }
+  playArchive(ch, [c[0], c[1], c[2], '']);
+}
+
+function showArchive(ch) {
+  const now = Date.now();
+  const days = ch.arch > 0 ? ch.arch : 7;
+  const l = epgList(ch) || [];
+  const items = l.filter((p) => p[1] <= now && p[0] >= now - days * 86400e3).reverse().slice(0, 400);
+  if (!items.length) { toast('Keine vergangenen Sendungen im Programmführer gefunden', 4000); return; }
+  const body = el('div');
+  body.style.cssText = 'max-height:60vh;overflow:auto';
+  let lastDay = '';
+  let api = null;
+  for (const p of items) {
+    const day = new Date(p[0]).toLocaleDateString('de-DE', { weekday: 'long', day: '2-digit', month: '2-digit' });
+    if (day !== lastDay) {
+      lastDay = day;
+      body.appendChild(el('div', 'small', `<b>${esc(day)}</b>`));
+    }
+    const b = el('button', 'opt', `<span>${hm(p[0])}&nbsp;&nbsp;${esc(p[2])}</span><span class="val">${Math.max(1, Math.round((p[1] - p[0]) / 60000))} min</span>`);
+    b.addEventListener('click', () => { api.close(); setTimeout(() => playArchive(ch, p), 0); });
+    body.appendChild(b);
+  }
+  api = openModal({ title: 'Sendungsarchiv – ' + ch.name, body, buttons: [{ label: 'Schließen' }] });
+}
+
+function showCtx(i) {
+  const ch = state.items[i];
+  if (!ch) return;
+  if (ch.folder) { toast('Serie: Enter öffnet die Folgen', 2000); return; }
+  const rows = [{ label: favSet().has(ch.url) ? '★ Favorit entfernen' : '★ Favorit hinzufügen', value: 'F', pick: () => toggleFav(ch) }];
+  if (canArchive(ch)) {
+    rows.push({ label: 'Sendungsarchiv', value: `${ch.arch > 0 ? ch.arch : 7} Tage`, pick: () => showArchive(ch) });
+    rows.push({ label: 'Von vorn schauen', value: '', pick: () => watchFromStart(ch) });
+  }
+  menuDialog(ch.name, () => rows);
 }
 
 function showSearch(kind) {
@@ -1858,14 +2221,15 @@ function showInfo() {
   let host = '';
   try { host = new URL(playlistUrl()).host; } catch (e) { host = ''; }
   openModal({
-    title: 'DJ64 für Windows 1.3',
-    body: `<div>Live-TV: ${n.live} &nbsp; Filme: ${n.movie} &nbsp; Serien: ${n.series}<br>Favoriten: ${favSet().size}<br>Quelle: ${usesXtream() ? 'Xtream: ' + esc(host) + ' (Benutzer ' + esc(S.get('user', '')) + ')' : host ? 'M3U: ' + esc(host) : '(keine)'}</div>
+    title: 'DJ64 für Windows 1.4',
+    body: `<div>Live-TV: ${n.live} &nbsp; Filme: ${n.movie} &nbsp; Serien: ${n.series}<br>Favoriten: ${favSet().size}<br>Quelle: ${usesXtream() ? 'Xtream (API): ' + esc(host) + ' (Benutzer ' + esc(S.get('user', '')) + ')' : host ? 'M3U: ' + esc(host) : '(keine)'}</div>
     <div class="small" style="margin-top:1rem;line-height:1.7">
       <b>In der Liste</b><br>
       Pfeile = auswählen · Links/Rechts = Kategorien/Liste · Enter = Abspielen · F = Favorit · Strg+F = Suche · Esc = zurück<br>
       <b>Beim Abspielen</b><br>
       Live: Hoch/Runter = Sender wechseln · Film/Serie: Links/Rechts = Spulen, Hoch/Runter = Lautstärke<br>
       Serien: Enter öffnet den Ordner einer Serie, Esc schließt ihn<br>
+      Rechtsklick, C oder Enter lange gedrückt = Menü: Favorit, Sendungsarchiv, Von vorn schauen<br>
       Leertaste = Pause · M = Ton aus · A = Bildformat · I = Info · F11 = Vollbild · Esc = zurück
     </div>`,
     buttons: [{ label: 'OK', primary: true }]
@@ -1880,10 +2244,24 @@ async function refreshPlaylist() {
   const pid = PID;
   toast('Playlist wird geladen …', 0);
   try {
-    const text = await window.api.fetchText(url);
-    const pl = parseM3u(text);
+    let pl = null;
+    const xb = xtreamBase();
+    if (xb) {
+      // Zuerst die schnelle JSON-Schnittstelle; bei Fehlern automatisch zurück auf get.php (M3U).
+      try {
+        const r = await window.api.xtreamLoad({ base: xb, user: String(S.get('user', '')).trim(), pass: String(S.get('pass', '')) });
+        pl = { channels: r.channels.map(hydrate), epg: '' };
+      } catch (e) {
+        pl = null;
+        if (pid === PID) toast('Xtream-Schnittstelle nicht erreichbar, lade M3U …', 2500);
+      }
+    }
+    if (!pl) {
+      const text = await window.api.fetchText(url);
+      pl = await parseM3uAsync(text);
+    }
     if (!pl.channels.length) throw new Error('Keine Einträge in der Playlist gefunden');
-    await window.api.cacheWrite(text, pid);
+    await window.api.cacheWrite(packPlaylist(pl), pid);
     if (pid !== PID) return;
     setPlaylist(pl);
     toast(`${pl.channels.length} Einträge geladen`, 2500);
@@ -1904,6 +2282,8 @@ const playerEl = $('#player');
 let cur = null;           // aktuell geladener Eintrag
 let mp = null;            // mpegts.js
 let hls = null;           // hls.js
+let dash = null;          // dash.js
+let headersOn = false;
 let loadToken = 0;
 let watchdog = 0;
 let retryTimer = 0;
@@ -1915,6 +2295,7 @@ let ctlTimer = 0;
 
 function engineOrderFor(ch) {
   const p = ch.url.split('?')[0].toLowerCase();
+  if (/\.mpd$/.test(p)) return ['dash', 'native'];
   if (/\.(m3u8|m3u)$/.test(p)) return ['hls', 'native'];
   if (/\.(mp4|webm|m4v|mov|mkv|avi)$/.test(p)) return ['native'];
   return ['ts', 'hls', 'native'];
@@ -1929,6 +2310,10 @@ function destroyEngine() {
   if (hls) {
     try { hls.destroy(); } catch (e) { /* egal */ }
     hls = null;
+  }
+  if (dash) {
+    try { dash.reset(); } catch (e) { /* egal */ }
+    dash = null;
   }
   video.removeAttribute('src');
   try { video.load(); } catch (e) { /* egal */ }
@@ -1950,7 +2335,7 @@ function startStream(ch) {
   retries = 0;
   bufBoost = 0;
   pendingResume = null;
-  if (ch.kind !== 'live' && S.get('resumeMode', 1) !== 2) {
+  if (ch.kind !== 'live' && !ch.archive && S.get('resumeMode', 1) !== 2) {
     const e = S.get('resume', {})[ch.url];
     if (e && e[0] > 10) pendingResume = { pos: e[0], force: false };
   }
@@ -1960,8 +2345,22 @@ function startStream(ch) {
   playerEl.classList.remove('hidden');
   playerEl.classList.toggle('live-mode', ch.kind === 'live');
   placePlayer();
+  if (ch.drm) {
+    destroyEngine();
+    osd('DRM-Stream: nur in der Android-App', 0);
+    return;
+  }
   osd('Lade …', 0);
-  tryEngine(0, loadToken);
+  const tok = loadToken;
+  const go = () => tryEngine(0, tok);
+  if (ch.ua || ch.ref) {
+    // User-Agent/Referer dieses Streams im Hauptprozess für genau diesen Server setzen
+    headersOn = true;
+    window.api.setHeaders(ch.url, { ua: ch.ua || '', ref: ch.ref || '' }).then(go, go);
+  } else if (headersOn) {
+    headersOn = false;
+    window.api.setHeaders(ch.url, null).then(go, go);
+  } else go();
 }
 
 function tryEngine(i, token) {
@@ -1988,6 +2387,13 @@ function tryEngine(i, token) {
       mp.load();
       const p = mp.play();
       if (p && p.catch) p.catch(() => {});
+    } else if (kind === 'dash') {
+      if (!window.dashjs) { fail(); return; }
+      dash = dashjs.MediaPlayer().create();
+      const bc = bufCfg().hls;
+      dash.updateSettings({ streaming: { buffer: { bufferTimeDefault: Math.max(8, bc.maxBufferLength / 2), bufferTimeAtTopQuality: bc.maxBufferLength, bufferToKeep: bc.backBufferLength } } });
+      dash.on('error', fail);
+      dash.initialize(video, cur.url, true);
     } else if (kind === 'hls') {
       if (!window.Hls || !Hls.isSupported()) { fail(); return; }
       hls = new Hls(Object.assign({ enableWorker: true }, bufCfg().hls));
@@ -2104,7 +2510,11 @@ window.addEventListener('resize', placePlayer);
 function playFull(index) {
   const ch = state.items[index];
   if (!ch) return;
-  if (ch.folder) { openFolder(ch, index); return; }
+  if (ch.folder) {
+    if (ch.lazy && !ch.loaded) loadSeriesFolder(ch).then((ok) => { if (ok && state.items[index] === ch) openFolder(ch, index); });
+    else openFolder(ch, index);
+    return;
+  }
   if (isBlocked(ch)) { askUnlock(() => fillItems(state.sel)); return; }
   const list = state.items.filter((c) => !c.folder);
   state.sel = index;
@@ -2136,8 +2546,8 @@ function exitFull() {
   if (!state.full) return;
   setFull(false);
   clearTimeout(ctlTimer);
-  if (state.kind !== 'live') stopStream();
-  else if (state.play) { const pi = state.items.indexOf(state.play.list[state.play.idx]); selectItem(pi >= 0 ? pi : state.sel); setZone('list'); }
+  if (state.kind !== 'live' || (cur && cur.archive)) stopStream();
+  if (state.kind === 'live' && state.play) { const pi = state.items.indexOf(state.play.list[state.play.idx]); selectItem(pi >= 0 ? pi : state.sel); setZone('list'); }
   osd(null);
 }
 
@@ -2410,6 +2820,16 @@ function onKey(e) {
   }
 }
 
+let enterDown = 0;
+let ctxFired = false;
+let ctxTimer = 0;
+document.addEventListener('keyup', (e) => {
+  if (e.key !== 'Enter' || !enterDown) return;
+  clearTimeout(ctxTimer);
+  enterDown = 0;
+  if (!ctxFired && !modals.length && state.screen === 'browse' && !state.full) playFull(state.sel);
+});
+
 function browseKey(e) {
   const list = state.zone === 'cats' ? catList : chanList;
   const count = state.zone === 'cats' ? state.cats.length : state.items.length;
@@ -2430,10 +2850,20 @@ function browseKey(e) {
     case 'ArrowLeft': e.preventDefault(); if (state.zone === 'list') setZone('cats'); break;
     case 'Enter':
       e.preventDefault();
-      if (state.zone === 'cats') enterCat(); else playFull(state.sel);
+      if (state.zone === 'cats') { enterCat(); break; }
+      // Enter lange gedrückt = Kontextmenü (Favorit, Sendungsarchiv), kurz = Abspielen
+      if (!e.repeat) {
+        enterDown = Date.now();
+        ctxFired = false;
+        clearTimeout(ctxTimer);
+        ctxTimer = setTimeout(() => { ctxFired = true; enterDown = 0; if (!modals.length && state.screen === 'browse' && !state.full) showCtx(state.sel); }, 600);
+      }
       break;
     case 'f': case 'F':
       if (state.zone === 'list') toggleFav(state.items[state.sel]);
+      break;
+    case 'c': case 'C': case 'ContextMenu':
+      if (state.zone === 'list') { e.preventDefault(); showCtx(state.sel); }
       break;
     case 'Escape': case 'Backspace':
       e.preventDefault();
@@ -2494,6 +2924,7 @@ window.addEventListener('offline', () => { if (state.screen === 'home') renderHo
    ===================================================================== */
 
 (async function init() {
+  migrateSecrets();
   applyLook();
   video.volume = S.get('volume', 100) / 100;
   // Zuerst sofort zeichnen und das Intro starten, danach erst Daten laden (blockiert keine Eingabe).
@@ -2507,11 +2938,11 @@ window.addEventListener('offline', () => { if (state.screen === 'home') renderHo
   try {
     const cached = await window.api.cacheRead(PID);
     if (cached) {
-      setPlaylist(parseM3u(cached));
+      setPlaylist(await loadCached(cached));
       if (state.screen === 'home') renderHome();
     }
   } catch (e) { /* kein Cache */ }
-  if (S.get('epgauto', true)) setTimeout(() => loadEpg(false), 300);
+  if (S.get('epgauto', true)) setTimeout(() => loadEpg(false), 100);
   setTimeout(() => loadWeather(false), 100);
   if (playlistUrl()) setTimeout(refreshPlaylist, 600);
 })();

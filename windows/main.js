@@ -1,5 +1,8 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, safeStorage, session } = require('electron');
+const { Worker } = require('worker_threads');
+const xtream = require('./xtream.js');
+const { parseEpgBuffer } = require('./epg.js');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
@@ -31,7 +34,7 @@ app.on('second-instance', () => {
 
 // ---------------------------------------------------------------- Netzwerk
 
-function getBuffer(url, redirects = 0) {
+function request(url, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     let u;
     try {
@@ -40,10 +43,15 @@ function getBuffer(url, redirects = 0) {
       return reject(new Error('Ungültige Adresse'));
     }
     const lib = u.protocol === 'https:' ? https : http;
-    const req = lib.get(u, { headers: { 'User-Agent': 'DJ64/1.0' }, timeout: 30000 }, (res) => {
+    const req = lib.get(u, { headers: Object.assign({ 'User-Agent': 'DJ64/1.4' }, headers), timeout: 30000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 5) {
         res.resume();
-        resolve(getBuffer(new URL(res.headers.location, u).toString(), redirects + 1));
+        resolve(request(new URL(res.headers.location, u).toString(), headers, redirects + 1));
+        return;
+      }
+      if (res.statusCode === 304) {
+        res.resume();
+        resolve({ status: 304, headers: res.headers, buf: null });
         return;
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -61,7 +69,7 @@ function getBuffer(url, redirects = 0) {
         }
         chunks.push(c);
       });
-      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, buf: Buffer.concat(chunks) }));
       res.on('error', reject);
     });
     req.on('timeout', () => req.destroy(new Error('Zeitüberschreitung')));
@@ -69,65 +77,114 @@ function getBuffer(url, redirects = 0) {
   });
 }
 
+async function getBuffer(url) {
+  return (await request(url)).buf;
+}
+
 function maybeGunzip(buf) {
   if (buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b) return zlib.gunzipSync(buf);
   return buf;
 }
 
-// ---------------------------------------------------------------- EPG
+// ---------------------------------------------------------------- EPG (Zwischenspeicher + Worker)
 
-const entities = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&#39;': "'" };
-function decode(s) {
-  return s.replace(/&(amp|lt|gt|quot|apos|#39);/g, (m) => entities[m]).replace(/<!\[CDATA\[|\]\]>/g, '');
-}
-function norm(s) {
-  return s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-}
-function xmltvTime(s) {
-  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{4})?/.exec((s || '').trim());
-  if (!m) return -1;
-  let t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
-  if (m[7]) {
-    const sign = m[7][0] === '-' ? -1 : 1;
-    t -= sign * ((+m[7].slice(1, 3)) * 60 + (+m[7].slice(3, 5))) * 60000;
-  }
-  return t;
+const EPG_FRESH_MS = 6 * 3600e3;
+
+function parseInWorker(raw, opts) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try {
+      w = new Worker(path.join(__dirname, 'epg-worker.js'));
+    } catch (e) {
+      // Notlösung: im Hauptprozess parsen
+      try {
+        let b = raw;
+        if (b.length > 2 && b[0] === 0x1f && b[1] === 0x8b) b = zlib.gunzipSync(b);
+        resolve(parseEpgBuffer(b, Date.now(), opts));
+      } catch (err) {
+        reject(err);
+      }
+      return;
+    }
+    w.once('message', (m) => {
+      w.terminate();
+      if (m.ok) resolve(m.res); else reject(new Error(m.error));
+    });
+    w.once('error', (e) => { w.terminate(); reject(e); });
+    w.postMessage({ raw: new Uint8Array(raw), now: Date.now(), opts });
+  });
 }
 
-function parseEpg(xml, now) {
-  const from = now - 2 * 3600e3;
-  const to = now + 24 * 3600e3;
-  const names = {};
-  const channels = {};
-
-  const chRe = /<channel\s+id="([^"]*)"[^>]*>([\s\S]*?)<\/channel>/g;
-  let m;
-  while ((m = chRe.exec(xml))) {
-    const id = decode(m[1]);
-    const dn = /<display-name[^>]*>([\s\S]*?)<\/display-name>/g;
-    let d;
-    while ((d = dn.exec(m[2]))) {
-      const key = norm(decode(d[1]));
-      if (key && !(key in names)) names[key] = id;
+async function epgLoad(url, opts) {
+  opts = opts || {};
+  const pid = Number(opts.pid) || 0;
+  const file = path.join(app.getPath('userData'), `epg_${pid}.bin`);
+  const metaFile = file + '.json';
+  let meta = {};
+  try { meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')); } catch (e) { meta = {}; }
+  const have = fs.existsSync(file) && meta.url === url;
+  let raw = null;
+  if (have && Date.now() - (meta.t || 0) < EPG_FRESH_MS) {
+    raw = fs.readFileSync(file);
+  } else {
+    try {
+      const h = {};
+      if (have && meta.etag) h['If-None-Match'] = meta.etag;
+      if (have && meta.lastMod) h['If-Modified-Since'] = meta.lastMod;
+      const r = await request(url, h);
+      if (r.status === 304 && have) {
+        raw = fs.readFileSync(file);
+        meta.t = Date.now();
+      } else {
+        raw = r.buf;
+        meta = { url, etag: r.headers.etag || '', lastMod: r.headers['last-modified'] || '', t: Date.now() };
+        try { fs.writeFileSync(file, raw); } catch (e) { /* egal */ }
+      }
+      try { fs.writeFileSync(metaFile, JSON.stringify(meta)); } catch (e) { /* egal */ }
+    } catch (e) {
+      if (have) raw = fs.readFileSync(file); // Netzfehler: alten Zwischenspeicher nutzen
+      else throw e;
     }
   }
+  return parseInWorker(raw, { ids: opts.ids, names: opts.names, arch: opts.arch });
+}
 
-  const prRe = /<programme\s+([^>]*)>([\s\S]*?)<\/programme>/g;
-  while ((m = prRe.exec(xml))) {
-    const attrs = m[1];
-    const start = xmltvTime((/start="([^"]*)"/.exec(attrs) || [])[1]);
-    const stop = xmltvTime((/stop="([^"]*)"/.exec(attrs) || [])[1]);
-    if (start < 0 || stop < 0 || stop <= from || start >= to) continue;
-    const ch = (/channel="([^"]*)"/.exec(attrs) || [])[1];
-    if (!ch) continue;
-    const t = /<title[^>]*>([\s\S]*?)<\/title>/.exec(m[2]);
-    if (!t) continue;
-    const dsc = /<desc[^>]*>([\s\S]*?)<\/desc>/.exec(m[2]);
-    const id = decode(ch);
-    (channels[id] || (channels[id] = [])).push([start, stop, decode(t[1]).trim(), dsc ? decode(dsc[1]).trim().slice(0, 500) : '']);
+// ---------------------------------------------------------------- Zugangsdaten verschlüsseln (Windows DPAPI über safeStorage)
+
+function secretEnc(text) {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    return 'enc:' + safeStorage.encryptString(String(text)).toString('base64');
+  } catch (e) {
+    return null;
   }
-  for (const id of Object.keys(channels)) channels[id].sort((a, b) => a[0] - b[0]);
-  return { channels, names };
+}
+function secretDec(text) {
+  try {
+    if (typeof text !== 'string' || !text.startsWith('enc:')) return null;
+    return safeStorage.decryptString(Buffer.from(text.slice(4), 'base64'));
+  } catch (e) {
+    return null;
+  }
+}
+ipcMain.on('secret-enc', (e, text) => { e.returnValue = secretEnc(text); });
+ipcMain.on('secret-dec', (e, text) => { e.returnValue = secretDec(text); });
+
+// ---------------------------------------------------------------- Kopfzeilen für einzelne Streams (User-Agent, Referer)
+
+const headerRules = new Map(); // Herkunft (https://host:port) -> { ua, ref }
+function originOf(u) {
+  try { return new URL(u).origin; } catch (e) { return ''; }
+}
+function installHeaderHook() {
+  session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ['http://*/*', 'https://*/*'] }, (details, cb) => {
+    const r = headerRules.size ? headerRules.get(originOf(details.url)) : null;
+    if (!r) { cb({ requestHeaders: details.requestHeaders }); return; }
+    const h = Object.assign({}, details.requestHeaders);
+    if (r.ua) h['User-Agent'] = r.ua;
+    if (r.ref) h.Referer = r.ref;
+    cb({ requestHeaders: h });
+  });
 }
 
 // ---------------------------------------------------------------- IPC
@@ -148,9 +205,16 @@ ipcMain.handle('fetch-image', async (_e, url) => {
   return buf.toString('base64');
 });
 
-ipcMain.handle('epg-load', async (_e, url) => {
-  const buf = maybeGunzip(await getBuffer(url));
-  return parseEpg(buf.toString('utf8'), Date.now());
+ipcMain.handle('epg-load', async (_e, url, opts) => epgLoad(url, opts));
+
+const getJson = async (url) => JSON.parse(maybeGunzip(await getBuffer(url)).toString('utf8'));
+ipcMain.handle('xtream-load', async (_e, a) => xtream.loadAll(String(a.base), String(a.user), String(a.pass), getJson));
+ipcMain.handle('xtream-series', async (_e, a) => xtream.seriesInfo(String(a.base), String(a.user), String(a.pass), String(a.id), String(a.name || ''), getJson));
+ipcMain.handle('set-headers', async (_e, url, h) => {
+  if (!h) { headerRules.clear(); return true; }
+  const o = originOf(url);
+  if (o) headerRules.set(o, { ua: String(h.ua || ''), ref: String(h.ref || '') });
+  return true;
 });
 
 ipcMain.handle('cache-read', async (_e, id) => {
@@ -246,5 +310,8 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  installHeaderHook();
+  createWindow();
+});
 app.on('window-all-closed', () => app.quit());

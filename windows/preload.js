@@ -4,7 +4,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   fetchText: (url) => ipcRenderer.invoke('fetch-text', url),
   fetchImage: (url) => ipcRenderer.invoke('fetch-image', url),
-  loadEpg: (url) => ipcRenderer.invoke('epg-load', url),
+  loadEpg: (url, opts) => ipcRenderer.invoke('epg-load', url, opts),
+  xtreamLoad: (a) => ipcRenderer.invoke('xtream-load', a),
+  xtreamSeries: (a) => ipcRenderer.invoke('xtream-series', a),
+  setHeaders: (url, h) => ipcRenderer.invoke('set-headers', url, h),
+  encSync: (text) => ipcRenderer.sendSync('secret-enc', text),
+  decSync: (text) => ipcRenderer.sendSync('secret-dec', text),
   cacheRead: (id) => ipcRenderer.invoke('cache-read', id),
   cacheWrite: (text, id) => ipcRenderer.invoke('cache-write', text, id),
   cacheClear: (id) => ipcRenderer.invoke('cache-clear', id),

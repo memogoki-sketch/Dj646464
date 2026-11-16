@@ -103,7 +103,12 @@ class MainActivity : Activity() {
     private val resizeNames = listOf("Anpassen (Original-Format)", "Gestreckt (Vollbild)", "Zoom (Ränder abschneiden)")
     private val seekChoices = listOf(5, 10, 15, 20, 30, 60, 120, 300, 600)
     private var resumeAt = 0L
-    private val uaNames = arrayOf("VLC (empfohlen)", "DJ64", "Browser (Chrome)")
+    private val uaNames = arrayOf("VLC (empfohlen)", "DJ64", "Browser (Chrome)", "Kodi", "IPTV Smarters", "okhttp", "Eigene …")
+    private val engineNames = arrayOf("Eingebaut (ExoPlayer)", "VLC (extern)", "MX Player (extern)", "Systemauswahl (extern)")
+    private val decoderNames = arrayOf("Hardware", "Hardware mit Ersatz (empfohlen)", "Software bevorzugt")
+    private val fmtNames = arrayOf("Wie in der Liste", "TS", "HLS (m3u8)")
+    private val containerNames = arrayOf("Automatisch", "HLS", "MPEG-TS", "DASH")
+    private val loginNames = arrayOf("Automatisch", "Nur M3U-Datei", "Nur Xtream-API")
     private var httpFactory: DefaultHttpDataSource.Factory? = null
     private val xepCache = HashMap<String, List<Channel>>()
     private var archiveBack: Pair<Int, Int>? = null
@@ -1066,7 +1071,7 @@ class MainActivity : Activity() {
                 st(R.drawable.ic_tune, "Leistung", "Puffer · Vorschau · Intro") { perfMenu() },
                 st(R.drawable.ic_weather, "Wetter", if (store.wxName.isBlank()) "Ort wählen" else store.wxName) { weatherSettings() },
                 st(R.drawable.ic_trash, "Cache leeren", null) { clearCache() },
-                st(R.drawable.ic_info, "Info und Tasten", "Version 1.8") { showInfo() }
+                st(R.drawable.ic_info, "Info und Tasten", "Version 1.9") { showInfo() }
             )
         )
         grid.addView(
@@ -1237,6 +1242,7 @@ class MainActivity : Activity() {
 
     private fun playerSettings() {
         val items = arrayOf(
+            "Player-Engine, Stream-Format, Kennung …",
             "Film/Serie – Spulschritt vorwärts: ${store.fwdSec} Sekunden",
             "Film/Serie – Spulschritt zurück: ${store.backSec} Sekunden",
             "Schneller spulen beim Gedrückthalten: ${onOff(store.accelSeek)}",
@@ -1248,11 +1254,12 @@ class MainActivity : Activity() {
             .setTitle("Player")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> pickSeek(true)
-                    1 -> pickSeek(false)
-                    2 -> { store.accelSeek = !store.accelSeek; playerSettings() }
-                    3 -> pickResume()
-                    4 -> pickVolume()
+                    0 -> engineMenu()
+                    1 -> pickSeek(true)
+                    2 -> pickSeek(false)
+                    3 -> { store.accelSeek = !store.accelSeek; playerSettings() }
+                    4 -> pickResume()
+                    5 -> pickVolume()
                     else -> pickResize()
                 }
             }
@@ -1794,7 +1801,7 @@ class MainActivity : Activity() {
             "Programmführer automatisch laden: ${onOff(store.epgAuto)}",
             "Startanimation: ${introNames[store.introMode.coerceIn(0, 2)]}",
             "Startanimation jetzt ansehen",
-            "Kennung gegenüber dem Anbieter: ${uaNames[store.uaMode.coerceIn(0, 2)]}"
+            "Player, Stream-Format und Kennung …"
         )
         AlertDialog.Builder(this)
             .setTitle("Leistung")
@@ -1808,7 +1815,7 @@ class MainActivity : Activity() {
                     5 -> { store.logos = !store.logos; perfMenu() }
                     6 -> { store.epgAuto = !store.epgAuto; perfMenu() }
                     7 -> choose("Startanimation", introNames, store.introMode) { store.introMode = it }
-                    9 -> choose("Kennung gegenüber dem Anbieter", uaNames, store.uaMode) { store.uaMode = it }
+                    9 -> engineMenu()
                     8 -> {
                         val keep = store.introMode
                         if (keep == 2) store.introMode = 0
@@ -2352,9 +2359,26 @@ class MainActivity : Activity() {
         play(listOf(a), 0)
     }
 
+    private val liveExt = Regex("""^(https?://.+?/live/[^/]+/[^/]+/\d+)\.\w+(.*)$""")
+
+    /** Stellt das gewählte Stream-Format für Xtream-Live-Adressen ein (TS oder HLS). */
+    private fun streamUrl(ch: Channel): String {
+        if (ch.kind != Kind.LIVE || store.streamFmt == 0) return ch.url
+        val m = liveExt.find(ch.url) ?: return ch.url
+        return m.groupValues[1] + (if (store.streamFmt == 2) ".m3u8" else ".ts") + m.groupValues[2]
+    }
+
     private fun buildItem(ch: Channel): MediaItem {
-        val b = MediaItem.Builder().setUri(ch.url)
-        if (ch.url.substringBefore('?').endsWith(".mpd", true)) b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+        val url = streamUrl(ch)
+        val b = MediaItem.Builder().setUri(url)
+        if (url.substringBefore('?').endsWith(".mpd", true)) b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+        if (ch.kind == Kind.LIVE) {
+            when (store.container) {
+                1 -> b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                2 -> b.setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP2T)
+                3 -> b.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD)
+            }
+        }
         val headers = HashMap<String, String>()
         if (ch.ua.isNotBlank()) headers["User-Agent"] = ch.ua
         if (ch.referer.isNotBlank()) headers["Referer"] = ch.referer
@@ -2395,6 +2419,109 @@ class MainActivity : Activity() {
         return b.build()
     }
 
+
+    // ---------------------------------------------------------------- Engine, Format, Kennung
+
+    private fun chooseTo(title: String, names: Array<String>, cur: Int, apply: (Int) -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(names, cur) { d, which ->
+                apply(which)
+                d.dismiss()
+                engineMenu()
+            }
+            .setNegativeButton("Zurück") { _, _ -> engineMenu() }
+            .show()
+    }
+
+    private fun engineMenu() {
+        val ua = store.uaMode.coerceIn(0, 6)
+        val items = arrayOf(
+            "Live-Player: ${engineNames[store.engineLive.coerceIn(0, 3)]}",
+            "Film/Serie-Player: ${engineNames[store.engineVod.coerceIn(0, 3)]}",
+            "Decoder (eingebaut): ${decoderNames[store.decoder.coerceIn(0, 2)]}",
+            "Stream-Format (Xtream-Live): ${fmtNames[store.streamFmt.coerceIn(0, 2)]}",
+            "Container erzwingen (Live): ${containerNames[store.container.coerceIn(0, 3)]}",
+            "Kennung (User-Agent): ${uaNames[ua]}${if (ua == 6) " – ${store.uaCustom}" else ""}",
+            "Anmeldeart: ${loginNames[store.loginMode.coerceIn(0, 2)]}"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Player, Format und Kennung")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> chooseTo("Live-Player", engineNames, store.engineLive) { store.engineLive = it }
+                    1 -> chooseTo("Film/Serie-Player", engineNames, store.engineVod) { store.engineVod = it }
+                    2 -> chooseTo("Decoder", decoderNames, store.decoder) { store.decoder = it; restartPlayer() }
+                    3 -> chooseTo("Stream-Format", fmtNames, store.streamFmt) { store.streamFmt = it; restartPlayer() }
+                    4 -> chooseTo("Container erzwingen", containerNames, store.container) { store.container = it; restartPlayer() }
+                    5 -> chooseTo("Kennung gegenüber dem Anbieter", uaNames, store.uaMode) { m ->
+                        store.uaMode = m
+                        if (m == 6) askUa() else restartPlayer()
+                    }
+                    6 -> chooseTo("Anmeldeart", loginNames, store.loginMode) { store.loginMode = it; val u = store.playlistUrl(); if (u.isNotBlank()) refreshPlaylist(u) }
+                }
+            }
+            .setNegativeButton("Schließen", null)
+            .show()
+    }
+
+    private fun askUa() {
+        val input = EditText(this).apply {
+            setSingleLine()
+            setText(store.uaCustom)
+            hint = "z. B. VLC/3.0.20 LibVLC/3.0.20"
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Eigene Kennung (User-Agent)")
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("Speichern") { _, _ ->
+                store.uaCustom = input.text.toString().trim()
+                restartPlayer()
+                engineMenu()
+            }
+            .show()
+    }
+
+    /** Startet einen externen Player, wenn dieser für Live bzw. Film/Serie gewählt ist. */
+    private fun launchExternal(ch: Channel): Boolean {
+        val eng = if (ch.kind == Kind.LIVE) store.engineLive else store.engineVod
+        if (eng == 0 || !isReal(ch)) return false
+        val url = streamUrl(ch)
+        val ua = ch.ua.ifBlank { store.userAgent() }
+        fun intentFor(pkg: String?): Intent {
+            val i = Intent(Intent.ACTION_VIEW)
+            i.setDataAndType(android.net.Uri.parse(url), if (url.substringBefore('?').endsWith(".m3u8", true)) "application/x-mpegURL" else "video/*")
+            i.putExtra("title", ch.name)
+            val h = arrayListOf("User-Agent", ua)
+            if (ch.referer.isNotBlank()) { h.add("Referer"); h.add(ch.referer) }
+            i.putExtra("headers", h.toTypedArray())
+            if (pkg != null) i.setPackage(pkg)
+            return i
+        }
+        try {
+            when (eng) {
+                1 -> startActivity(intentFor("org.videolan.vlc"))
+                2 -> try {
+                    startActivity(intentFor("com.mxtech.videoplayer.ad"))
+                } catch (e: ActivityNotFoundException) {
+                    startActivity(intentFor("com.mxtech.videoplayer.pro"))
+                }
+                else -> startActivity(Intent.createChooser(intentFor(null), "Abspielen mit"))
+            }
+            if (archiveBack == null) store.addRecent(ch.url)
+            status("Läuft im externen Player", 2000)
+            return true
+        } catch (e: ActivityNotFoundException) {
+            status("Der gewählte Player ist nicht installiert – eingebauter Player startet", 4000)
+            return false
+        } catch (e: Exception) {
+            status("Externer Player nicht startbar: ${e.message}", 4000)
+            return false
+        }
+    }
+
     private fun showInfo() {
         val source = if (store.usesXtream()) {
             "Xtream: ${hostOf(store.playlistUrl())} (Benutzer ${store.user})"
@@ -2402,7 +2529,7 @@ class MainActivity : Activity() {
             "M3U: ${hostOf(store.playlistUrl())}"
         } else "(keine)"
         AlertDialog.Builder(this)
-            .setTitle("DJ64 1.8")
+            .setTitle("DJ64 1.9")
             .setMessage(
                 "Live-TV: ${count(Kind.LIVE)}   Filme: ${count(Kind.MOVIE)}   Serien: ${count(Kind.SERIES)}\n" +
                     "Favoriten: ${store.favoriteSet().size}\nNetzwerk: ${networkText()}\nQuelle: $source\n\n" +
@@ -2427,12 +2554,17 @@ class MainActivity : Activity() {
         Thread {
             try {
                 var got: Playlist? = null
-                val xt = store.xtream()
+                val mode = store.loginMode
+                val xt = if (mode == 1) null else store.xtream()
+                if (mode == 2 && xt == null) throw IOException("Xtream-API gewählt: bitte Server und Benutzername eintragen")
                 if (xt != null) {
                     try {
                         val list = XtreamApi.load(xt) { openStream(it) }
                         if (list.isNotEmpty()) got = Playlist(list, "")
-                    } catch (e: Exception) { /* Rückfall auf die M3U-Liste */ }
+                    } catch (e: Exception) {
+                        if (mode == 2) throw e
+                        /* sonst Rückfall auf die M3U-Liste */
+                    }
                 }
                 val parsed = got ?: openStream(url).use { M3uParser.parse(java.io.InputStreamReader(it, Charsets.UTF_8)) }
                 if (parsed.channels.isEmpty()) throw IOException("Keine Einträge in der Playlist gefunden")
@@ -2472,8 +2604,9 @@ class MainActivity : Activity() {
     private fun openStream(urlStr: String): InputStream {
         val clean = urlStr.filter { !it.isWhitespace() }
         var lastCode = 0
-        for (k in 0 until 3) {
-            val mode = (store.uaMode + k) % 3
+        val selected = store.uaMode
+        val cycle = if (selected in 0..2) listOf(selected) + (0..2).filter { it != selected } else listOf(selected)
+        for (mode in cycle) {
             var current = clean
             var redirects = 0
             while (true) {
@@ -2491,7 +2624,7 @@ class MainActivity : Activity() {
                     continue
                 }
                 if (code in 200..299) {
-                    if (mode != store.uaMode) store.uaMode = mode
+                    if (selected in 0..2 && mode != selected) store.uaMode = mode
                     return c.inputStream
                 }
                 lastCode = code
@@ -2516,7 +2649,15 @@ class MainActivity : Activity() {
             .setBufferDurationsMs(bufMin[lvl], bufMax[lvl], bufPlay[lvl], bufRe[lvl])
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
-        val p = ExoPlayer.Builder(this)
+        val rf = androidx.media3.exoplayer.DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(store.decoder >= 1)
+        if (store.decoder == 2) {
+            rf.setMediaCodecSelector { mime, secure, tunneling ->
+                androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling)
+                    .sortedBy { !(it.name.startsWith("OMX.google") || it.name.startsWith("c2.android")) }
+            }
+        }
+        val p = ExoPlayer.Builder(this, rf)
             .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSource))
             .build()
@@ -2613,6 +2754,7 @@ class MainActivity : Activity() {
         if (index !in list.indices) return
         val ch = list[index]
         handler.removeCallbacks(previewRunnable)
+        if (launchExternal(ch)) return
         playList = list
         playIndex = index
         playKind = ch.kind

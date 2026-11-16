@@ -52,15 +52,42 @@ class Store(context: Context) {
     }
 
     // ---- Kennung gegenüber dem Anbieter (User-Agent)
-    var uaMode: Int // 0 VLC, 1 DJ64, 2 Chrome
+    var uaMode: Int // 0 VLC, 1 DJ64, 2 Chrome, 3 Kodi, 4 IPTV Smarters, 5 okhttp, 6 Eigene
         get() = p.getInt("uaMode", 0)
         set(value) = p.edit().putInt("uaMode", value).apply()
+    var uaCustom: String
+        get() = str("uaCustom")
+        set(value) = put("uaCustom", value)
 
     fun userAgent(mode: Int = uaMode): String = when (mode) {
-        1 -> "DJ64/1.8"
+        1 -> "DJ64/1.9"
         2 -> "Mozilla/5.0 (Linux; Android 11; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        3 -> "Kodi/20.2 (Linux; Android 11; TV) Version/20.2"
+        4 -> "IPTVSmartersPro"
+        5 -> "okhttp/4.12.0"
+        6 -> uaCustom.ifBlank { "VLC/3.0.20 LibVLC/3.0.20" }
         else -> "VLC/3.0.20 LibVLC/3.0.20"
     }
+
+    // ---- Player-Engine, Stream-Format, Anmeldeart
+    var engineLive: Int // 0 eingebaut, 1 VLC, 2 MX Player, 3 Systemauswahl
+        get() = p.getInt("engLive", 0)
+        set(value) = p.edit().putInt("engLive", value).apply()
+    var engineVod: Int
+        get() = p.getInt("engVod", 0)
+        set(value) = p.edit().putInt("engVod", value).apply()
+    var decoder: Int // 0 Hardware, 1 Hardware + Ersatz, 2 Software bevorzugt
+        get() = p.getInt("decoder", 1)
+        set(value) = p.edit().putInt("decoder", value).apply()
+    var streamFmt: Int // 0 wie in der Liste, 1 TS, 2 HLS
+        get() = p.getInt("sfmt", 0)
+        set(value) = p.edit().putInt("sfmt", value).apply()
+    var container: Int // 0 automatisch, 1 HLS, 2 MPEG-TS, 3 DASH
+        get() = p.getInt("container", 0)
+        set(value) = p.edit().putInt("container", value).apply()
+    var loginMode: Int // 0 automatisch, 1 nur M3U, 2 nur Xtream-API
+        get() = p.getInt("loginMode", 0)
+        set(value) = p.edit().putInt("loginMode", value).apply()
 
     // ---- Film/Serie: Spulen und Fortsetzen
     var fwdSec: Int
